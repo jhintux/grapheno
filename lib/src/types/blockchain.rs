@@ -5,10 +5,12 @@ use crate::{
     sha256::Hash,
     util::MerkleRoot,
 };
+use crate::util::Saveable;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use bigdecimal::BigDecimal;
+use std::io::{Read, Write, Result as IoResult, Error as IoError, ErrorKind as IoErrorKind};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Blockchain {
@@ -280,5 +282,19 @@ impl Blockchain {
                 *marked = false;
             });
         }
+    }
+}
+
+impl Saveable for Blockchain {
+    fn load<I: Read>(reader: I) -> IoResult<Self> {
+        ciborium::de::from_reader(reader).map_err(|_| {
+            IoError::new(IoErrorKind::InvalidData, "Failed to deserialize blockchain")
+        })
+    }
+
+    fn save<O: Write>(&self, writer: O) -> IoResult<()> {
+        ciborium::ser::into_writer(self, writer).map_err(|_| {
+            IoError::new(IoErrorKind::InvalidData, "Failed to serialize blockchain")
+        })
     }
 }

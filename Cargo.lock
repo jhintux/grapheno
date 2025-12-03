@@ -63,7 +63,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "btc_lib"
+name = "btclib"
 version = "0.1.0"
 dependencies = [
  "bigdecimal",
