@@ -6,6 +6,7 @@ pub mod error;
 pub mod sha256;
 pub mod types;
 pub mod util;
+pub mod network;
 
 construct_uint! {
     // Construct an unsigned 256-bit integer
