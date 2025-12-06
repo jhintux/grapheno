@@ -2,7 +2,7 @@ use crate::sha256::Hash;
 use crate::util::Saveable;
 use ecdsa::{
     Signature as ECDSASignature, SigningKey, VerifyingKey,
-    signature::{SignerMut, Verifier},
+    signature::{Signer, Verifier},
 };
 use k256::{Secp256k1, pkcs8::EncodePublicKey};
 use rand_core::OsRng;
@@ -14,8 +14,8 @@ pub struct Signature(ECDSASignature<Secp256k1>);
 
 impl Signature {
     // sign a crate::types::TransactionOutput from its Sha256 hash
-    pub fn sign_output(output_hash: &Hash, private_key: &mut PrivateKey) -> Self {
-        let signing_key = &mut private_key.0;
+    pub fn sign_output(output_hash: &Hash, private_key: &PrivateKey) -> Self {
+        let signing_key = &private_key.0;
         let signature = signing_key.sign(&output_hash.as_bytes());
         Signature(signature)
     }
@@ -29,7 +29,7 @@ impl Signature {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Ord, PartialOrd)]
 pub struct PublicKey(VerifyingKey<Secp256k1>);
 
 #[derive(Serialize, Deserialize, Clone)]
