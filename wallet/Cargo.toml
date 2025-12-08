@@ -8,8 +8,7 @@ anyhow = "1.0.86"
 clap = { version = "4.5.8", features = ["derive"] }
 tracing-subscriber = { version = "0.3.18", features = ["env-filter", "fmt"] }
 crossbeam-skiplist = "0.1.3"
-cursive = "0.20.0"
-futures = "0.3.30"
+cursive = { version = "0.20.0", features = ["crossterm-backend"] }
 kanal = "0.1.0-pre8"
 serde = { version = "1.0.204", features = ["derive"] }
 text-to-ascii-art = "0.1.9"
@@ -18,5 +17,6 @@ toml = "0.8.14"
 tracing = "0.1.40"
 tracing-appender = "0.2.3"
 uuid = { version = "1.9.1", features = ["v4", "serde"] }
+
 # ours
 btclib = { version = "0.1.0", path = "../lib" }

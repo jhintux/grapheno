@@ -54,6 +54,7 @@ impl Blockchain {
 
     pub fn add_block(&mut self, block: Block) -> Result<()> {
         if self.blocks.is_empty() {
+            // Genesis block validation
             if block.header.prev_block_hash != Hash::zero() {
                 println!("Genesis block must have a hash of 0");
                 return Err(BtcError::InvalidBlock);
@@ -83,7 +84,10 @@ impl Blockchain {
 
             block
                 .verify_transactions(self.block_height(), &self.utxos)
-                .unwrap();
+                .map_err(|e| {
+                    println!("Transaction verification failed: {:?}", e);
+                    e
+                })?;
         }
 
         let block_transactions: HashSet<_> =

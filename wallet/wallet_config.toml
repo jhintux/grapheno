@@ -1,4 +1,6 @@
-my_keys = []
+my_keys = [
+    { public = "alice.pub.pem", private = "alice.priv.cbor" }
+]
 default_node = "127.0.0.1:9000"
 
 [[contacts]]

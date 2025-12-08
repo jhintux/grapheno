@@ -8,11 +8,16 @@ fn main() {
     let path = if let Some(arg) = env::args().nth(1) {
         arg
     } else {
-        eprint!("Usage: tx_gen <path to transaction file>");
+        eprint!("Usage: tx_gen <path to transaction file> [path to private key]");
         std::process::exit(1);
     };
 
-    let private_key = PrivateKey::new_key();
+    let private_key = if let Some(key_path) = env::args().nth(2) {
+        PrivateKey::load_from_file(&key_path)
+            .expect("Failed to load private key from file")
+    } else {
+        PrivateKey::new_key()
+    };
     let transaction = Transaction::new(
         vec![],
         vec![TransactionOutput {
