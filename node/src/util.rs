@@ -1,23 +1,32 @@
 use anyhow::{Context, Result};
 use btclib::network::Message;
-use btclib::types::Blockchain;
-use btclib::util::Saveable;
 use tokio::net::TcpStream;
 use tokio::time;
 
-pub async fn load_blockchain(blockchain_file: &str) -> Result<()> {
-    println!("blockchain file exists, loading...");
-    let new_blockchain = Blockchain::load_from_file(blockchain_file)?;
-    println!("blockchain loaded");
+pub async fn load_blockchain() -> Result<()> {
+    println!("loading blockchain from database...");
+    let db = crate::DB.read().await;
+    let db = db.as_ref().context("Database not initialized")?;
+    
+    let new_blockchain = db.load_blockchain()?;
+    println!("blockchain loaded from database");
+    
     let mut blockchain = crate::BLOCKCHAIN.write().await;
     *blockchain = new_blockchain;
+    
     println!("rebuilding utxos...");
     blockchain.rebuild_utxos();
     println!("utxos rebuilt");
+    
     println!("checking if target needs to be adjusted...");
     println!("current target: {}", blockchain.target());
     blockchain.try_adjust_target();
     println!("new target: {}", blockchain.target());
+    
+    // Save the updated blockchain back to database
+    drop(blockchain);
+    save_blockchain().await?;
+    
     println!("initialization complete");
     Ok(())
 }
@@ -112,12 +121,23 @@ pub async fn cleanup() {
     }
 }
 
-pub async fn save(name: String) {
+pub async fn save() {
     let mut interval = time::interval(time::Duration::from_secs(15));
     loop {
         interval.tick().await;
-        println!("saving blockchain to drive...");
-        let blockchain = crate::BLOCKCHAIN.read().await;
-        blockchain.save_to_file(name.clone()).unwrap();
+        if let Err(e) = save_blockchain().await {
+            println!("error saving blockchain to database: {}", e);
+        }
     }
+}
+
+pub async fn save_blockchain() -> Result<()> {
+    println!("saving blockchain to database...");
+    let db = crate::DB.read().await;
+    let db = db.as_ref().context("Database not initialized")?;
+    
+    let blockchain = crate::BLOCKCHAIN.read().await;
+    db.save_blockchain(&*blockchain)?;
+    println!("blockchain saved to database");
+    Ok(())
 }

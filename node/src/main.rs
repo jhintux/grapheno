@@ -3,10 +3,10 @@ use argh::FromArgs;
 use btclib::types::Blockchain;
 use dashmap::DashMap;
 use static_init::dynamic;
-use std::path::Path;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::RwLock;
 
+mod database;
 mod handler;
 mod util;
 
@@ -16,9 +16,9 @@ struct Args {
     #[argh(option, default = "9000")]
     /// port number
     port: u16,
-    #[argh(option, default = "String::from(\"./blockchain.cbor\")")]
-    /// blockchain file location
-    blockchain_file: String,
+    #[argh(option, default = "String::from(\"./blockchain_db\")")]
+    /// blockchain database directory
+    db_path: String,
     #[argh(positional)]
     /// addresses of initial nodes
     nodes: Vec<String>,
@@ -28,6 +28,8 @@ struct Args {
 pub static BLOCKCHAIN: RwLock<Blockchain> = RwLock::new(Blockchain::new());
 #[dynamic]
 pub static NODES: DashMap<String, TcpStream> = DashMap::new();
+#[dynamic]
+pub static DB: RwLock<Option<database::BlockchainDB>> = RwLock::new(None);
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -35,13 +37,22 @@ async fn main() -> Result<()> {
 
     // Access the parsed arguments
     let port = args.port;
-    let blockchain_file = args.blockchain_file;
+    let db_path = args.db_path;
     let nodes = args.nodes;
 
-    if Path::new(&blockchain_file).exists() {
-        util::load_blockchain(&blockchain_file).await?;
+    // Initialize database
+    println!("opening database at {}", db_path);
+    let db = database::BlockchainDB::open(&db_path)?;
+    {
+        let mut db_guard = DB.write().await;
+        *db_guard = Some(db);
+    }
+
+    // Try to load blockchain from database
+    if util::load_blockchain().await.is_ok() {
+        println!("blockchain loaded from database");
     } else {
-        println!("blockchain file does not exist");
+        println!("no blockchain found in database, initializing...");
         util::populate_connections(&nodes).await?;
         println!("total amount of known nodes: {}", NODES.len());
 
@@ -63,6 +74,9 @@ async fn main() -> Result<()> {
                 let mut blockchain = BLOCKCHAIN.write().await;
                 blockchain.try_adjust_target();
             }
+
+            // Save the downloaded blockchain to database
+            util::save_blockchain().await?;
         }
     }
 
@@ -73,7 +87,7 @@ async fn main() -> Result<()> {
     // start a task to periodically cleanup the mempool. Normally, you would want to keep and join the handle
     tokio::spawn(util::cleanup());
     // and a task to periodically save the blockchain
-    tokio::spawn(util::save(blockchain_file.clone()));
+    tokio::spawn(util::save());
 
     loop {
         let (socket, _) = listener.accept().await?;
