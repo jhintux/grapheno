@@ -55,20 +55,20 @@ This will create in `wallet` folder:
 
 ### Step 2: Start the Node
 
-Start the blockchain node. The node will listen on port 9000 by default and create a new blockchain if no existing blockchain file is found.
+Start the blockchain node. The node will listen on port 9000 by default and create a new blockchain database if no existing database is found.
 
 ```bash
-# Start node on default port 9000
+# Start node on default port 9000 with default database directory
 cargo run --bin node
 
-# Or specify a custom port
-cargo run --bin node -- --port 9001
+# Or specify a custom port and database directory
+cargo run --bin node -- --port 9001 --db-path ./node1_db
 ```
 
 The node will:
-- Start as a seed node if no blockchain file exists
+- Start as a seed node if no blockchain database exists
 - Listen for connections from miners and wallets
-- Save the blockchain to `blockchain.cbor` periodically
+- Save the blockchain to the database directory periodically (default: `./blockchain_db`)
 
 ### Step 3: Start the Miner
 
@@ -114,6 +114,64 @@ The wallet will:
 ### Step 5: View Your Balance
 
 Once the miner has successfully mined the genesis block (and any subsequent blocks), your wallet will display the balance associated with your public key. The balance updates automatically as new blocks are mined and transactions are processed.
+
+## Running Multiple Nodes
+
+You can run multiple nodes to create a distributed network. Each node needs:
+- A unique port number
+- A unique database directory
+- Addresses of other nodes to connect to
+
+### Example: Running 2 Nodes
+
+**Terminal 1 - Node 1 (Seed Node):**
+```bash
+cargo run --bin node -- --port 9000 --db-path ./node1_db
+```
+
+**Terminal 2 - Node 2 (Connects to Node 1):**
+```bash
+cargo run --bin node -- --port 9001 --db-path ./node2_db 127.0.0.1:9000
+```
+
+### Example: Running 3 Nodes
+
+**Terminal 1 - Node 1:**
+```bash
+cargo run --bin node -- --port 9000 --db-path ./node1_db
+```
+
+**Terminal 2 - Node 2:**
+```bash
+cargo run --bin node -- --port 9001 --db-path ./node2_db 127.0.0.1:9000
+```
+
+**Terminal 3 - Node 3:**
+```bash
+cargo run --bin node -- --port 9002 --db-path ./node3_db 127.0.0.1:9000 127.0.0.1:9001
+```
+
+### Key Points:
+
+- **Unique Database Paths**: Each node must have its own database directory (`--db-path`) to avoid conflicts
+- **Unique Ports**: Each node must listen on a different port (`--port`)
+- **Node Discovery**: When starting a node, provide addresses of other nodes as positional arguments (e.g., `127.0.0.1:9000`)
+- **Network Behavior**: 
+  - Nodes automatically discover each other through the `DiscoverNodes` message
+  - When a node connects to another, it receives a list of all known nodes
+  - Nodes sync blockchain state from the longest chain
+  - New blocks and transactions are broadcast to all connected peer nodes
+
+### Node Command-Line Options
+
+```bash
+cargo run --bin node -- --help
+```
+
+Available options:
+- `--port <PORT>` - Port number to listen on (default: 9000)
+- `--db-path <PATH>` - Database directory path (default: `./blockchain_db`)
+- `<nodes...>` - Addresses of initial nodes to connect to (positional arguments)
 
 ## Configuration
 
@@ -180,7 +238,10 @@ cargo test
 
 ## Notes
 
-- The blockchain file (`blockchain.cbor`) persists the blockchain state between node restarts
+- The blockchain database (default: `./blockchain_db`) persists the blockchain state between node restarts
+- Each node uses its own database directory to store blocks, UTXOs, mempool, and metadata
 - The genesis block is automatically created when the first block is mined on an empty blockchain
 - Multiple miners can connect to the same node and compete to mine blocks
+- Multiple nodes can run simultaneously, each with its own database and port
+- Nodes automatically sync with peers and maintain consensus on the longest valid chain
 - The wallet TUI requires a terminal that supports ANSI escape codes

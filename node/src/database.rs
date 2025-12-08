@@ -6,7 +6,7 @@ use btclib::{
 };
 use chrono::{DateTime, Utc};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
 use ciborium::{ser::into_writer, de::from_reader};
 use hex;
@@ -26,6 +26,9 @@ mod keys {
 /// Wrapper around Sled (LevelDB-like) for blockchain storage
 pub struct BlockchainDB {
     db: Arc<sled::Db>,
+    // Mutexes to protect key list updates from race conditions
+    utxo_keys_mutex: Arc<Mutex<()>>,
+    mempool_keys_mutex: Arc<Mutex<()>>,
 }
 
 impl BlockchainDB {
@@ -35,6 +38,8 @@ impl BlockchainDB {
             .context("Failed to open/create database")?;
         Ok(Self {
             db: Arc::new(db),
+            utxo_keys_mutex: Arc::new(Mutex::new(())),
+            mempool_keys_mutex: Arc::new(Mutex::new(())),
         })
     }
 
@@ -96,7 +101,8 @@ impl BlockchainDB {
             .insert(key.as_bytes(), value)
             .context("Failed to write UTXO to database")?;
         
-        // Update UTXO keys list
+        // Update UTXO keys list atomically to prevent race conditions
+        let _guard = self.utxo_keys_mutex.lock().unwrap();
         let mut utxo_keys = self.get_utxo_keys()?.unwrap_or_default();
         if !utxo_keys.contains(hash) {
             utxo_keys.push(*hash);
@@ -132,7 +138,8 @@ impl BlockchainDB {
             .remove(key.as_bytes())
             .context("Failed to delete UTXO from database")?;
         
-        // Update UTXO keys list
+        // Update UTXO keys list atomically to prevent race conditions
+        let _guard = self.utxo_keys_mutex.lock().unwrap();
         if let Some(mut utxo_keys) = self.get_utxo_keys()? {
             utxo_keys.retain(|h| h != hash);
             self.put_utxo_keys(&utxo_keys)?;
@@ -156,10 +163,13 @@ impl BlockchainDB {
     }
 
     /// Store a mempool transaction
+    /// Uses hash + timestamp as key to preserve duplicate transactions with different timestamps
     pub fn put_mempool_tx(&self, tx_hash: &Hash, timestamp: DateTime<Utc>, tx: &Transaction) -> Result<()> {
         let hash_bytes = tx_hash.as_bytes();
         let hash_hex = hex::encode(hash_bytes);
-        let key = format!("{}{}", keys::MEMPOOL_PREFIX, hash_hex);
+        // Include timestamp in key to handle duplicate transactions with different timestamps
+        let timestamp_nanos = timestamp.timestamp_nanos_opt().unwrap_or(0);
+        let key = format!("{}{}:{}", keys::MEMPOOL_PREFIX, hash_hex, timestamp_nanos);
         
         let mut value = Vec::new();
         into_writer(&(timestamp, tx), &mut value)
@@ -169,25 +179,29 @@ impl BlockchainDB {
             .insert(key.as_bytes(), value)
             .context("Failed to write mempool transaction to database")?;
         
-        // Update mempool keys list
+        // Update mempool keys list atomically to prevent race conditions
+        let _guard = self.mempool_keys_mutex.lock().unwrap();
         let mut mempool_keys = self.get_mempool_keys()?.unwrap_or_default();
-        if !mempool_keys.contains(tx_hash) {
-            mempool_keys.push(*tx_hash);
+        // Store (hash, timestamp) pair to preserve duplicates
+        let key_pair = (*tx_hash, timestamp);
+        if !mempool_keys.contains(&key_pair) {
+            mempool_keys.push(key_pair);
             self.put_mempool_keys(&mempool_keys)?;
         }
         
         Ok(())
     }
 
-    /// Retrieve a mempool transaction
-    pub fn get_mempool_tx(&self, tx_hash: &Hash) -> Result<Option<(DateTime<Utc>, Transaction)>> {
+    /// Retrieve a mempool transaction by hash and timestamp
+    pub fn get_mempool_tx(&self, tx_hash: &Hash, timestamp: DateTime<Utc>) -> Result<Option<(DateTime<Utc>, Transaction)>> {
         let hash_bytes = tx_hash.as_bytes();
         let hash_hex = hex::encode(hash_bytes);
-        let key = format!("{}{}", keys::MEMPOOL_PREFIX, hash_hex);
+        let timestamp_nanos = timestamp.timestamp_nanos_opt().unwrap_or(0);
+        let key = format!("{}{}:{}", keys::MEMPOOL_PREFIX, hash_hex, timestamp_nanos);
         
         match self.db.get(key.as_bytes()).context("Failed to read mempool transaction from database")? {
             Some(value) => {
-                let mempool_tx: (DateTime<Utc>, Transaction) = ciborium::de::from_reader(value.as_ref())
+                let mempool_tx: (DateTime<Utc>, Transaction) = from_reader(value.as_ref())
                     .context("Failed to deserialize mempool transaction")?;
                 Ok(Some(mempool_tx))
             }
@@ -195,19 +209,22 @@ impl BlockchainDB {
         }
     }
 
-    /// Delete a mempool transaction
-    pub fn delete_mempool_tx(&self, tx_hash: &Hash) -> Result<()> {
+    /// Delete a mempool transaction by hash and timestamp
+    pub fn delete_mempool_tx(&self, tx_hash: &Hash, timestamp: DateTime<Utc>) -> Result<()> {
         let hash_bytes = tx_hash.as_bytes();
         let hash_hex = hex::encode(hash_bytes);
-        let key = format!("{}{}", keys::MEMPOOL_PREFIX, hash_hex);
+        let timestamp_nanos = timestamp.timestamp_nanos_opt().unwrap_or(0);
+        let key = format!("{}{}:{}", keys::MEMPOOL_PREFIX, hash_hex, timestamp_nanos);
         
         self.db
             .remove(key.as_bytes())
             .context("Failed to delete mempool transaction from database")?;
         
-        // Update mempool keys list
+        // Update mempool keys list atomically to prevent race conditions
+        let _guard = self.mempool_keys_mutex.lock().unwrap();
         if let Some(mut mempool_keys) = self.get_mempool_keys()? {
-            mempool_keys.retain(|h| h != tx_hash);
+            let key_pair = (*tx_hash, timestamp);
+            mempool_keys.retain(|k| k != &key_pair);
             self.put_mempool_keys(&mempool_keys)?;
         }
         
@@ -219,8 +236,8 @@ impl BlockchainDB {
         let mut mempool = Vec::new();
         
         let mempool_keys = self.get_mempool_keys()?.unwrap_or_default();
-        for tx_hash in mempool_keys {
-            if let Some(tx) = self.get_mempool_tx(&tx_hash)? {
+        for (tx_hash, timestamp) in mempool_keys {
+            if let Some(tx) = self.get_mempool_tx(&tx_hash, timestamp)? {
                 mempool.push(tx);
             }
         }
@@ -302,8 +319,8 @@ impl BlockchainDB {
         }
     }
 
-    /// Store mempool keys list
-    fn put_mempool_keys(&self, keys: &[Hash]) -> Result<()> {
+    /// Store mempool keys list (hash, timestamp) pairs to preserve duplicates
+    fn put_mempool_keys(&self, keys: &[(Hash, DateTime<Utc>)]) -> Result<()> {
         let mut value = Vec::new();
         into_writer(keys, &mut value)
             .context("Failed to serialize mempool keys")?;
@@ -314,11 +331,11 @@ impl BlockchainDB {
         Ok(())
     }
 
-    /// Get mempool keys list
-    fn get_mempool_keys(&self) -> Result<Option<Vec<Hash>>> {
+    /// Get mempool keys list (hash, timestamp) pairs
+    fn get_mempool_keys(&self) -> Result<Option<Vec<(Hash, DateTime<Utc>)>>> {
         match self.db.get(keys::META_MEMPOOL_KEYS.as_bytes()).context("Failed to read mempool keys from database")? {
             Some(value) => {
-                let keys: Vec<Hash> = from_reader(value.as_ref())
+                let keys: Vec<(Hash, DateTime<Utc>)> = from_reader(value.as_ref())
                     .context("Failed to deserialize mempool keys")?;
                 Ok(Some(keys))
             }
@@ -329,8 +346,8 @@ impl BlockchainDB {
     /// Clear all mempool transactions (for cleanup)
     pub fn clear_mempool(&self) -> Result<()> {
         let mempool_keys = self.get_mempool_keys()?.unwrap_or_default();
-        for tx_hash in mempool_keys {
-            self.delete_mempool_tx(&tx_hash)?;
+        for (tx_hash, timestamp) in mempool_keys {
+            self.delete_mempool_tx(&tx_hash, timestamp)?;
         }
         Ok(())
     }
@@ -374,48 +391,73 @@ impl BlockchainDB {
         // Save target
         self.put_target(blockchain.target())?;
         
-        // Save all UTXOs
-        // First, clear existing UTXO keys to rebuild from scratch
-        if let Some(old_keys) = self.get_utxo_keys()? {
-            for hash in old_keys {
-                self.delete_utxo(&hash)?;
+        // Save all UTXOs atomically to prevent race conditions
+        {
+            let _guard = self.utxo_keys_mutex.lock().unwrap();
+            // First, clear existing UTXO keys to rebuild from scratch
+            if let Some(old_keys) = self.get_utxo_keys()? {
+                for hash in old_keys {
+                    // Delete UTXO data (but skip key list update since we're rebuilding it)
+                    let hash_bytes = hash.as_bytes();
+                    let hash_hex = hex::encode(hash_bytes);
+                    let key = format!("{}{}", keys::UTXO_PREFIX, hash_hex);
+                    self.db.remove(key.as_bytes())
+                        .context("Failed to delete UTXO from database")?;
+                }
+            }
+            
+            // Store new UTXO keys list
+            let utxo_hashes: Vec<Hash> = blockchain.utxos().keys().copied().collect();
+            self.put_utxo_keys(&utxo_hashes)?;
+            
+            // Save each UTXO (skip key list update since we just set it)
+            for (hash, (marked, output)) in blockchain.utxos() {
+                let hash_bytes = hash.as_bytes();
+                let hash_hex = hex::encode(hash_bytes);
+                let key = format!("{}{}", keys::UTXO_PREFIX, hash_hex);
+                let mut value = Vec::new();
+                into_writer(&(marked, output), &mut value)
+                    .context("Failed to serialize UTXO")?;
+                self.db.insert(key.as_bytes(), value)
+                    .context("Failed to write UTXO to database")?;
             }
         }
         
-        // Store new UTXO keys list
-        let utxo_hashes: Vec<Hash> = blockchain.utxos().keys().copied().collect();
-        self.put_utxo_keys(&utxo_hashes)?;
-        
-        // Save each UTXO (skip key list update since we just set it)
-        for (hash, (marked, output)) in blockchain.utxos() {
-            let hash_bytes = hash.as_bytes();
-            let hash_hex = hex::encode(hash_bytes);
-            let key = format!("{}{}", keys::UTXO_PREFIX, hash_hex);
-            let mut value = Vec::new();
-            into_writer(&(marked, output), &mut value)
-                .context("Failed to serialize UTXO")?;
-            self.db.insert(key.as_bytes(), value)
-                .context("Failed to write UTXO to database")?;
-        }
-        
-        // Save all mempool transactions
-        // First, clear existing mempool
-        if let Some(old_keys) = self.get_mempool_keys()? {
-            for tx_hash in old_keys {
-                self.delete_mempool_tx(&tx_hash)?;
+        // Save all mempool transactions atomically to prevent race conditions
+        {
+            let _guard = self.mempool_keys_mutex.lock().unwrap();
+            // First, clear existing mempool
+            if let Some(old_keys) = self.get_mempool_keys()? {
+                for (tx_hash, timestamp) in old_keys {
+                    // Delete mempool data (but skip key list update since we're rebuilding it)
+                    let hash_bytes = tx_hash.as_bytes();
+                    let hash_hex = hex::encode(hash_bytes);
+                    let timestamp_nanos = timestamp.timestamp_nanos_opt().unwrap_or(0);
+                    let key = format!("{}{}:{}", keys::MEMPOOL_PREFIX, hash_hex, timestamp_nanos);
+                    self.db.remove(key.as_bytes())
+                        .context("Failed to delete mempool transaction from database")?;
+                }
             }
-        }
-        
-        // Store new mempool keys list
-        let mempool_hashes: Vec<Hash> = blockchain.mempool().iter()
-            .map(|(_, tx)| tx.hash())
-            .collect();
-        self.put_mempool_keys(&mempool_hashes)?;
-        
-        // Save each mempool transaction
-        for (timestamp, tx) in blockchain.mempool() {
-            let tx_hash = tx.hash();
-            self.put_mempool_tx(&tx_hash, *timestamp, tx)?;
+            
+            // Store new mempool keys list with (hash, timestamp) pairs to preserve duplicates
+            let mempool_keys: Vec<(Hash, DateTime<Utc>)> = blockchain.mempool().iter()
+                .map(|(timestamp, tx)| (tx.hash(), *timestamp))
+                .collect();
+            self.put_mempool_keys(&mempool_keys)?;
+            
+            // Save each mempool transaction with unique key (hash + timestamp)
+            for (timestamp, tx) in blockchain.mempool() {
+                let tx_hash = tx.hash();
+                let hash_bytes = tx_hash.as_bytes();
+                let hash_hex = hex::encode(hash_bytes);
+                let timestamp_nanos = timestamp.timestamp_nanos_opt().unwrap_or(0);
+                let key = format!("{}{}:{}", keys::MEMPOOL_PREFIX, hash_hex, timestamp_nanos);
+                let mut value = Vec::new();
+                into_writer(&(timestamp, tx), &mut value)
+                    .context("Failed to serialize mempool transaction")?;
+                self.db.insert(key.as_bytes(), value)
+                    .context("Failed to write mempool transaction to database")?;
+            }
         }
         
         Ok(())

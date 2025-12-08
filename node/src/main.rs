@@ -1,11 +1,8 @@
 use anyhow::Result;
 use argh::FromArgs;
-use btclib::types::Blockchain;
-use dashmap::DashMap;
-use static_init::dynamic;
-use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::RwLock;
+use tokio::net::TcpListener;
 
+mod context;
 mod database;
 mod handler;
 mod util;
@@ -24,13 +21,6 @@ struct Args {
     nodes: Vec<String>,
 }
 
-#[dynamic]
-pub static BLOCKCHAIN: RwLock<Blockchain> = RwLock::new(Blockchain::new());
-#[dynamic]
-pub static NODES: DashMap<String, TcpStream> = DashMap::new();
-#[dynamic]
-pub static DB: RwLock<Option<database::BlockchainDB>> = RwLock::new(None);
-
 #[tokio::main]
 async fn main() -> Result<()> {
     let args: Args = argh::from_env();
@@ -43,40 +33,39 @@ async fn main() -> Result<()> {
     // Initialize database
     println!("opening database at {}", db_path);
     let db = database::BlockchainDB::open(&db_path)?;
-    {
-        let mut db_guard = DB.write().await;
-        *db_guard = Some(db);
-    }
+    
+    // Create node context
+    let ctx = context::NodeContext::new(db);
 
     // Try to load blockchain from database
-    if util::load_blockchain().await.is_ok() {
+    if util::load_blockchain(&ctx).await.is_ok() {
         println!("blockchain loaded from database");
     } else {
         println!("no blockchain found in database, initializing...");
-        util::populate_connections(&nodes).await?;
-        println!("total amount of known nodes: {}", NODES.len());
+        util::populate_connections(&ctx, &nodes).await?;
+        println!("total amount of known nodes: {}", ctx.nodes.len());
 
         if nodes.is_empty() {
             println!("no initial nodes provided, starting as a seed node");
         } else {
-            let (longest_name, longest_count) = util::find_longest_chain_node().await?;
+            let (longest_name, longest_count) = util::find_longest_chain_node(&ctx).await?;
 
-            util::download_blockchain(&longest_name, longest_count).await?;
+            util::download_blockchain(&ctx, &longest_name, longest_count).await?;
 
             println!("blockchain downloaded, from {}", longest_name);
 
             {
-                let mut blockchain = BLOCKCHAIN.write().await;
+                let mut blockchain = ctx.blockchain.write().await;
                 blockchain.rebuild_utxos();
             }
 
             {
-                let mut blockchain = BLOCKCHAIN.write().await;
+                let mut blockchain = ctx.blockchain.write().await;
                 blockchain.try_adjust_target();
             }
 
             // Save the downloaded blockchain to database
-            util::save_blockchain().await?;
+            util::save_blockchain(&ctx).await?;
         }
     }
 
@@ -84,13 +73,18 @@ async fn main() -> Result<()> {
     let listener = TcpListener::bind(&addr).await?;
     println!("Listening on {}", addr);
 
+    // Clone context for background tasks
+    let ctx_cleanup = ctx.clone();
+    let ctx_save = ctx.clone();
+
     // start a task to periodically cleanup the mempool. Normally, you would want to keep and join the handle
-    tokio::spawn(util::cleanup());
+    tokio::spawn(util::cleanup(ctx_cleanup));
     // and a task to periodically save the blockchain
-    tokio::spawn(util::save());
+    tokio::spawn(util::save(ctx_save));
 
     loop {
         let (socket, _) = listener.accept().await?;
-        tokio::spawn(handler::handle_connection(socket));
+        let ctx_handle = ctx.clone();
+        tokio::spawn(handler::handle_connection(ctx_handle, socket));
     }
 }

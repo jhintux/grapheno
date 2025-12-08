@@ -3,15 +3,15 @@ use btclib::network::Message;
 use tokio::net::TcpStream;
 use tokio::time;
 
-pub async fn load_blockchain() -> Result<()> {
+use crate::context::NodeContext;
+
+pub async fn load_blockchain(ctx: &NodeContext) -> Result<()> {
     println!("loading blockchain from database...");
-    let db = crate::DB.read().await;
-    let db = db.as_ref().context("Database not initialized")?;
     
-    let new_blockchain = db.load_blockchain()?;
+    let new_blockchain = ctx.db.load_blockchain()?;
     println!("blockchain loaded from database");
     
-    let mut blockchain = crate::BLOCKCHAIN.write().await;
+    let mut blockchain = ctx.blockchain.write().await;
     *blockchain = new_blockchain;
     
     println!("rebuilding utxos...");
@@ -25,13 +25,13 @@ pub async fn load_blockchain() -> Result<()> {
     
     // Save the updated blockchain back to database
     drop(blockchain);
-    save_blockchain().await?;
+    save_blockchain(ctx).await?;
     
     println!("initialization complete");
     Ok(())
 }
 
-pub async fn populate_connections(nodes: &[String]) -> Result<()> {
+pub async fn populate_connections(ctx: &NodeContext, nodes: &[String]) -> Result<()> {
     println!("trying to connect to other nodes...");
     for node in nodes {
         println!("connecting to {}", node);
@@ -46,30 +46,30 @@ pub async fn populate_connections(nodes: &[String]) -> Result<()> {
                 for child_node in child_nodes {
                     println!("adding node {}", child_node);
                     let new_stream = TcpStream::connect(&child_node).await?;
-                    crate::NODES.insert(child_node, new_stream);
+                    ctx.nodes.insert(child_node, new_stream);
                 }
             }
             _ => {
                 println!("unexpected message from {}", node);
             }
         }
-        crate::NODES.insert(node.clone(), stream);
+        ctx.nodes.insert(node.clone(), stream);
     }
     Ok(())
 }
 
 // TODO potential security problem, malicious node could return a very large number (321). Create a consensus mecanism and AskDifference message could be used to do that.
-pub async fn find_longest_chain_node() -> Result<(String, u32)> {
+pub async fn find_longest_chain_node(ctx: &NodeContext) -> Result<(String, u32)> {
     println!("finding nodes with the highest blockchain length...");
     let mut longest_name = String::new();
     let mut longest_count = 0;
-    let all_nodes = crate::NODES
+    let all_nodes = ctx.nodes
         .iter()
         .map(|x| x.key().clone())
         .collect::<Vec<_>>();
     for node in all_nodes {
         println!("asking {} for blockchain length", node);
-        let mut stream = crate::NODES.get_mut(&node).context("no node")?;
+        let mut stream = ctx.nodes.get_mut(&node).context("no node")?;
         let message = Message::AskDifference(0);
         message.send_async(&mut *stream).await.unwrap();
         println!("sent AskDifference to {}", node);
@@ -92,15 +92,15 @@ pub async fn find_longest_chain_node() -> Result<(String, u32)> {
 }
 
 // TODO add another message type that would return an entire chain of blocks
-pub async fn download_blockchain(node: &str, count: u32) -> Result<()> {
-    let mut stream = crate::NODES.get_mut(node).unwrap();
+pub async fn download_blockchain(ctx: &NodeContext, node: &str, count: u32) -> Result<()> {
+    let mut stream = ctx.nodes.get_mut(node).unwrap();
     for i in 0..count as usize {
         let message = Message::FetchBlock(i);
         message.send_async(&mut *stream).await?;
         let message = Message::receive_async(&mut *stream).await?;
         match message {
             Message::NewBlock(block) => {
-                let mut blockchain = crate::BLOCKCHAIN.write().await;
+                let mut blockchain = ctx.blockchain.write().await;
                 blockchain.add_block(block)?;
             }
             _ => {
@@ -111,33 +111,31 @@ pub async fn download_blockchain(node: &str, count: u32) -> Result<()> {
     Ok(())
 }
 
-pub async fn cleanup() {
+pub async fn cleanup(ctx: NodeContext) {
     let mut interval = time::interval(time::Duration::from_secs(30));
     loop {
         interval.tick().await;
         println!("cleaning the mempool from old transactions");
-        let mut blockchain = crate::BLOCKCHAIN.write().await;
+        let mut blockchain = ctx.blockchain.write().await;
         blockchain.cleanup_mempool();
     }
 }
 
-pub async fn save() {
+pub async fn save(ctx: NodeContext) {
     let mut interval = time::interval(time::Duration::from_secs(15));
     loop {
         interval.tick().await;
-        if let Err(e) = save_blockchain().await {
+        if let Err(e) = save_blockchain(&ctx).await {
             println!("error saving blockchain to database: {}", e);
         }
     }
 }
 
-pub async fn save_blockchain() -> Result<()> {
+pub async fn save_blockchain(ctx: &NodeContext) -> Result<()> {
     println!("saving blockchain to database...");
-    let db = crate::DB.read().await;
-    let db = db.as_ref().context("Database not initialized")?;
     
-    let blockchain = crate::BLOCKCHAIN.read().await;
-    db.save_blockchain(&*blockchain)?;
+    let blockchain = ctx.blockchain.read().await;
+    ctx.db.save_blockchain(&*blockchain)?;
     println!("blockchain saved to database");
     Ok(())
 }
