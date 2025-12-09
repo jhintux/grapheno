@@ -1,16 +1,16 @@
 use super::{Block, Transaction, TransactionOutput};
+use crate::util::Saveable;
 use crate::{
     U256,
     error::{BtcError, Result},
     sha256::Hash,
     util::MerkleRoot,
 };
-use crate::util::Saveable;
+use bigdecimal::BigDecimal;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use bigdecimal::BigDecimal;
-use std::io::{Read, Write, Result as IoResult, Error as IoError, ErrorKind as IoErrorKind};
+use std::io::{Error as IoError, ErrorKind as IoErrorKind, Read, Result as IoResult, Write};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Blockchain {
@@ -173,8 +173,23 @@ impl Blockchain {
             known_inputs.insert(input.prev_transaction_output_hash);
         }
 
-        // TODO check if we can merge into one for loop
-        // TODO Note that we are making a bit of a simplification. In two conflicting transactions, real Bitcoin would remove the one with the smaller fee (which is great for ergonomics - you can’t get your transaction through fast enough -> you increase the fee).
+        // Calculate the fee of the new transaction
+        let new_inputs_value = transaction
+            .inputs
+            .iter()
+            .map(|input| {
+                self.utxos
+                    .get(&input.prev_transaction_output_hash)
+                    .expect("BUG: impossible")
+                    .1
+                    .value
+            })
+            .sum::<u64>();
+        let new_outputs_value: u64 = transaction.outputs.iter().map(|output| output.value).sum();
+        let new_transaction_fee = new_inputs_value
+            .checked_sub(new_outputs_value)
+            .ok_or(BtcError::InvalidTransaction)?;
+
         for input in &transaction.inputs {
             if let Some((true, _)) = self.utxos.get(&input.prev_transaction_output_hash) {
                 // find the transaction that references the utxo we are trying to reference
@@ -191,6 +206,31 @@ impl Blockchain {
 
                 // if we have found on, unmark all of its utxos
                 if let Some((idx, (_, referencing_transaction))) = referencing_transaction {
+                    let referencing_fee_inputs = referencing_transaction
+                        .inputs
+                        .iter()
+                        .map(|input| {
+                            self.utxos
+                                .get(&input.prev_transaction_output_hash)
+                                .expect("BUG: impossible")
+                                .1
+                                .value
+                        })
+                        .sum::<u64>();
+                    let referencing_fee_outputs: u64 = referencing_transaction
+                        .outputs
+                        .iter()
+                        .map(|output| output.value)
+                        .sum();
+                    let referencing_fee = referencing_fee_inputs
+                        .checked_sub(referencing_fee_outputs)
+                        .ok_or(BtcError::InvalidTransaction)?;
+
+                    // If the new transaction fee is less than the referencing transaction fee, the new transaction is rejected
+                    if new_transaction_fee <= referencing_fee {
+                        return Err(BtcError::InvalidTransaction);
+                    }
+
                     for input in &referencing_transaction.inputs {
                         // set all utxos from this transaction to false
                         self.utxos
@@ -213,18 +253,8 @@ impl Blockchain {
         }
 
         // all inputs must be lower than all outputs
-        let all_inputs = transaction
-            .inputs
-            .iter()
-            .map(|input| {
-                self.utxos
-                    .get(&input.prev_transaction_output_hash)
-                    .expect("BUG: impossible")
-                    .1
-                    .value
-            })
-            .sum::<u64>();
-        let all_outputs = transaction.outputs.iter().map(|output| output.value).sum();
+        let all_inputs = new_inputs_value;
+        let all_outputs = new_outputs_value;
         if all_inputs < all_outputs {
             return Err(BtcError::InvalidTransaction);
         }
@@ -298,14 +328,12 @@ impl Blockchain {
 
 impl Saveable for Blockchain {
     fn load<I: Read>(reader: I) -> IoResult<Self> {
-        ciborium::de::from_reader(reader).map_err(|_| {
-            IoError::new(IoErrorKind::InvalidData, "Failed to deserialize blockchain")
-        })
+        ciborium::de::from_reader(reader)
+            .map_err(|_| IoError::new(IoErrorKind::InvalidData, "Failed to deserialize blockchain"))
     }
 
     fn save<O: Write>(&self, writer: O) -> IoResult<()> {
-        ciborium::ser::into_writer(self, writer).map_err(|_| {
-            IoError::new(IoErrorKind::InvalidData, "Failed to serialize blockchain")
-        })
+        ciborium::ser::into_writer(self, writer)
+            .map_err(|_| IoError::new(IoErrorKind::InvalidData, "Failed to serialize blockchain"))
     }
 }

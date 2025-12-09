@@ -7,26 +7,26 @@ use crate::context::NodeContext;
 
 pub async fn load_blockchain(ctx: &NodeContext) -> Result<()> {
     println!("loading blockchain from database...");
-    
+
     let new_blockchain = ctx.db.load_blockchain()?;
     println!("blockchain loaded from database");
-    
+
     let mut blockchain = ctx.blockchain.write().await;
     *blockchain = new_blockchain;
-    
+
     println!("rebuilding utxos...");
     blockchain.rebuild_utxos();
     println!("utxos rebuilt");
-    
+
     println!("checking if target needs to be adjusted...");
     println!("current target: {}", blockchain.target());
     blockchain.try_adjust_target();
     println!("new target: {}", blockchain.target());
-    
+
     // Save the updated blockchain back to database
     drop(blockchain);
     save_blockchain(ctx).await?;
-    
+
     println!("initialization complete");
     Ok(())
 }
@@ -63,7 +63,8 @@ pub async fn find_longest_chain_node(ctx: &NodeContext) -> Result<(String, u32)>
     println!("finding nodes with the highest blockchain length...");
     let mut longest_name = String::new();
     let mut longest_count = 0;
-    let all_nodes = ctx.nodes
+    let all_nodes = ctx
+        .nodes
         .iter()
         .map(|x| x.key().clone())
         .collect::<Vec<_>>();
@@ -91,21 +92,22 @@ pub async fn find_longest_chain_node(ctx: &NodeContext) -> Result<(String, u32)>
     Ok((longest_name, longest_count as u32))
 }
 
-// TODO add another message type that would return an entire chain of blocks
-pub async fn download_blockchain(ctx: &NodeContext, node: &str, count: u32) -> Result<()> {
+// FetchAllBlocks message type returns an entire chain of blocks
+pub async fn download_blockchain(ctx: &NodeContext, node: &str, _count: u32) -> Result<()> {
     let mut stream = ctx.nodes.get_mut(node).unwrap();
-    for i in 0..count as usize {
-        let message = Message::FetchBlock(i);
-        message.send_async(&mut *stream).await?;
-        let message = Message::receive_async(&mut *stream).await?;
-        match message {
-            Message::NewBlock(block) => {
-                let mut blockchain = ctx.blockchain.write().await;
+    let message = Message::FetchAllBlocks;
+    message.send_async(&mut *stream).await?;
+    let message = Message::receive_async(&mut *stream).await?;
+    match message {
+        Message::AllBlocks(blocks) => {
+            println!("received {} blocks from {}", blocks.len(), node);
+            let mut blockchain = ctx.blockchain.write().await;
+            for block in blocks {
                 blockchain.add_block(block)?;
             }
-            _ => {
-                println!("unexpected message from {}", node);
-            }
+        }
+        _ => {
+            anyhow::bail!("unexpected message from {}", node);
         }
     }
     Ok(())
@@ -133,7 +135,7 @@ pub async fn save(ctx: NodeContext) {
 
 pub async fn save_blockchain(ctx: &NodeContext) -> Result<()> {
     println!("saving blockchain to database...");
-    
+
     let blockchain = ctx.blockchain.read().await;
     ctx.db.save_blockchain(&*blockchain)?;
     println!("blockchain saved to database");

@@ -19,7 +19,8 @@ pub async fn handle_connection(ctx: NodeContext, mut socket: TcpStream) {
         };
         use btclib::network::Message::*;
         match message {
-            UTXOs(_) | Template(_) | Difference(_) | TemplateValidity(_) | NodeList(_) => {
+            UTXOs(_) | Template(_) | Difference(_) | TemplateValidity(_) | NodeList(_)
+            | AllBlocks(_) => {
                 println!("I am neither a miner nor a wallet! Goodbye");
                 return;
             }
@@ -32,8 +33,15 @@ pub async fn handle_connection(ctx: NodeContext, mut socket: TcpStream) {
                 let message = NewBlock(block);
                 message.send_async(&mut socket).await.unwrap();
             }
+            FetchAllBlocks => {
+                let blockchain = ctx.blockchain.read().await;
+                let blocks: Vec<Block> = blockchain.blocks().cloned().collect();
+                let message = AllBlocks(blocks);
+                message.send_async(&mut socket).await.unwrap();
+            }
             DiscoverNodes => {
-                let nodes = ctx.nodes
+                let nodes = ctx
+                    .nodes
                     .iter()
                     .map(|x| x.key().clone())
                     .collect::<Vec<_>>();
@@ -98,7 +106,8 @@ pub async fn handle_connection(ctx: NodeContext, mut socket: TcpStream) {
                 println!("block looks good, broadcasting");
 
                 //send block to all nodes
-                let nodes = ctx.nodes
+                let nodes = ctx
+                    .nodes
                     .iter()
                     .map(|x| x.key().clone())
                     .collect::<Vec<_>>();
@@ -120,7 +129,8 @@ pub async fn handle_connection(ctx: NodeContext, mut socket: TcpStream) {
                 }
                 println!("added transaction to mempool");
                 // send transaction to all nodes
-                let nodes = ctx.nodes
+                let nodes = ctx
+                    .nodes
                     .iter()
                     .map(|x| x.key().clone())
                     .collect::<Vec<_>>();

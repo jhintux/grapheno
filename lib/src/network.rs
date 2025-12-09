@@ -42,6 +42,10 @@ pub enum Message {
     Difference(i32),
     /// Ask a node to send a block with the specified height
     FetchBlock(usize),
+    /// Ask a node to send all blocks in the chain
+    FetchAllBlocks,
+    /// Response containing all blocks in the chain
+    AllBlocks(Vec<Block>),
     /// Broadcast a new block to other nodes
     NewBlock(Block),
 }
@@ -86,7 +90,7 @@ impl Message {
         stream.write_all(&bytes).await?;
         Ok(())
     }
-    
+
     pub async fn receive_async(
         stream: &mut (impl AsyncRead + Unpin),
     ) -> Result<Self, ciborium::de::Error<IoError>> {
