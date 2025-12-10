@@ -5,6 +5,7 @@ use btclib::types::{Block, BlockHeader, Transaction, TransactionOutput};
 use btclib::util::MerkleRoot;
 use chrono::Utc;
 use tokio::net::TcpStream;
+use tracing::{info, debug, warn, error};
 use uuid::Uuid;
 
 pub async fn handle_connection(ctx: NodeContext, mut socket: TcpStream) {
@@ -13,14 +14,14 @@ pub async fn handle_connection(ctx: NodeContext, mut socket: TcpStream) {
         let message = match Message::receive_async(&mut socket).await {
             Ok(message) => message,
             Err(e) => {
-                println!("invalid message from peer: {e}, closing that connection");
+                warn!("invalid message from peer: {e}, closing that connection");
                 return;
             }
         };
         use btclib::network::Message::*;
         match message {
             UTXOs(_) | Template(_) | Difference(_) | TemplateValidity(_) | NodeList(_) => {
-                println!("I am neither a miner nor a wallet! Goodbye");
+                warn!("I am neither a miner nor a wallet! Goodbye");
                 return;
             }
             FetchBlock(height) => {
@@ -47,7 +48,7 @@ pub async fn handle_connection(ctx: NodeContext, mut socket: TcpStream) {
                 message.send_async(&mut socket).await.unwrap();
             }
             FetchUTXOs(key) => {
-                println!("received request to fetch UTXOs");
+                debug!("received request to fetch UTXOs");
                 let blockchain = ctx.blockchain.read().await;
                 let utxos = blockchain
                     .utxos()
@@ -61,17 +62,17 @@ pub async fn handle_connection(ctx: NodeContext, mut socket: TcpStream) {
             // TODO send back new blocks and txs to other nodes preventing the network from creating notifications loops
             NewBlock(block) => {
                 let mut blockchain = ctx.blockchain.write().await;
-                println!("received new block: {}", block.hash());
+                info!("received new block: {}", block.hash());
                 if blockchain.add_block(block.clone()).is_err() {
-                    println!("block rejected: {}", block.hash());
+                    warn!("block rejected: {}", block.hash());
                     return;
                 }
             }
             NewTransaction(tx) => {
                 let mut blockchain = ctx.blockchain.write().await;
-                println!("received new transaction: {}", tx.hash());
+                info!("received new transaction: {}", tx.hash());
                 if blockchain.add_to_mempool(tx.clone()).is_err() {
-                    println!("transaction rejected: {}", tx.hash());
+                    warn!("transaction rejected: {}", tx.hash());
                     return;
                 }
             }
@@ -88,14 +89,14 @@ pub async fn handle_connection(ctx: NodeContext, mut socket: TcpStream) {
                 message.send_async(&mut socket).await.unwrap();
             }
             SubmitTemplate(block) => {
-                println!("received allegedly mined template");
+                info!("received allegedly mined template");
                 let mut blockchain = ctx.blockchain.write().await;
                 if let Err(e) = blockchain.add_block(block.clone()) {
-                    println!("block rejected: {e}, closing connection");
+                    warn!("block rejected: {e}, closing connection");
                     return;
                 }
                 blockchain.rebuild_utxos();
-                println!("block looks good, broadcasting");
+                info!("block looks good, broadcasting");
 
                 //send block to all nodes
                 let nodes = ctx.nodes
@@ -106,19 +107,19 @@ pub async fn handle_connection(ctx: NodeContext, mut socket: TcpStream) {
                     if let Some(mut stream) = ctx.nodes.get_mut(&node) {
                         let message = Message::NewBlock(block.clone());
                         if message.send_async(&mut *stream).await.is_err() {
-                            println!("failed to send block to {node}")
+                            warn!("failed to send block to {node}")
                         };
                     }
                 }
             }
             SubmitTransaction(tx) => {
-                println!("submit tx");
+                debug!("submit tx");
                 let mut blockchain = ctx.blockchain.write().await;
                 if let Err(e) = blockchain.add_to_mempool(tx.clone()) {
-                    println!("transaction rejected: {e}, closing connection");
+                    warn!("transaction rejected: {e}, closing connection");
                     return;
                 }
-                println!("added transaction to mempool");
+                info!("added transaction to mempool");
                 // send transaction to all nodes
                 let nodes = ctx.nodes
                     .iter()
@@ -128,11 +129,11 @@ pub async fn handle_connection(ctx: NodeContext, mut socket: TcpStream) {
                     if let Some(mut stream) = ctx.nodes.get_mut(&node) {
                         let message = Message::NewTransaction(tx.clone());
                         if message.send_async(&mut *stream).await.is_err() {
-                            println!("failed to send transaction to {node}")
+                            warn!("failed to send transaction to {node}")
                         };
                     }
                 }
-                println!("transaction sent to all nodes");
+                debug!("transaction sent to all nodes");
             }
             FetchTemplate(pubkey) => {
                 let blockchain = ctx.blockchain.read().await;
@@ -181,7 +182,7 @@ pub async fn handle_connection(ctx: NodeContext, mut socket: TcpStream) {
                 let miner_fees = match block.calculate_miner_fees(blockchain.utxos()) {
                     Ok(fees) => fees,
                     Err(e) => {
-                        println!("error calculating miner fees: {e}, closing connection");
+                        error!("error calculating miner fees: {e}, closing connection");
                         return;
                     }
                 };

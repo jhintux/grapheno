@@ -37,7 +37,7 @@ pub fn ui_task(core: Arc<Core>, balance_content: TextContent) -> JoinHandle<()> 
     tokio::task::spawn_blocking(move || {
         info!("Running UI");
         if let Err(e) = run_ui(core, balance_content) {
-            eprintln!("UI ended with error: {e}");
+            error!("UI ended with error: {e}");
         };
     })
 }
