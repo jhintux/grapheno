@@ -9,6 +9,7 @@ use std::path::Path;
 use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio::sync::RwLock;
+use tracing::info;
 
 /// Shared context for the node containing blockchain, database, and peer connections
 #[derive(Clone)]
@@ -20,17 +21,17 @@ pub struct NodeContext {
 
 impl NodeContext {
     pub async fn new<P: AsRef<Path>>(db_path: P, nodes: &[String]) -> Result<Self> {
-        println!("opening database at {}", db_path.as_ref().display());
+        info!("opening database at {}", db_path.as_ref().display());
         let db = Arc::new(BlockchainDB::open(db_path)?);
         
         // Load blockchain from database or initialize a new one
         let blockchain = match db.load_blockchain() {
             Ok(loaded_blockchain) => {
-                println!("blockchain loaded from database");
+                info!("blockchain loaded from database");
                 Arc::new(RwLock::new(loaded_blockchain))
             }
             Err(_) => {
-                println!("no blockchain found in database, initializing...");
+                info!("no blockchain found in database, initializing...");
                 Arc::new(RwLock::new(Blockchain::new()))
             }
         };
@@ -39,10 +40,10 @@ impl NodeContext {
         let nodes_connections = if blockchain.read().await.block_height() == 0 {
             // New blockchain, need to connect to nodes
             let connections = populate_connections(nodes).await?;
-            println!("total amount of known nodes: {}", connections.len());
+            info!("total amount of known nodes: {}", connections.len());
 
             if nodes.is_empty() {
-                println!("no initial nodes provided, starting as a seed node");
+                info!("no initial nodes provided, starting as a seed node");
             } else {
                 let (longest_name, longest_count) =
                     find_longest_chain_node(&connections).await?;
@@ -55,7 +56,7 @@ impl NodeContext {
                 )
                 .await?;
 
-                println!("blockchain downloaded, from {}", longest_name);
+                info!("blockchain downloaded, from {}", longest_name);
 
                 {
                     let mut blockchain_guard = blockchain.write().await;

@@ -14,7 +14,7 @@ use crate::database::BlockchainDB;
 
 pub async fn populate_connections(nodes: &[String]) -> Result<Arc<DashMap<String, TcpStream>>> {
     let node_connections = Arc::new(DashMap::new());
-    println!("trying to connect to other nodes...");
+    debug!("trying to connect to other nodes...");
     for node in nodes {
         debug!("connecting to {}", node);
         let mut stream = TcpStream::connect(&node).await?;
@@ -44,7 +44,7 @@ pub async fn populate_connections(nodes: &[String]) -> Result<Arc<DashMap<String
 pub async fn find_longest_chain_node(
     nodes_connections: &Arc<DashMap<String, TcpStream>>,
 ) -> Result<(String, u32)> {
-    println!("finding nodes with the highest blockchain length...");
+    debug!("finding nodes with the highest blockchain length...");
     let mut longest_name = String::new();
     let mut longest_count = 0;
     let all_nodes = nodes_connections
@@ -52,14 +52,14 @@ pub async fn find_longest_chain_node(
         .map(|x| x.key().clone())
         .collect::<Vec<_>>();
     for node in all_nodes {
-        println!("asking {} for blockchain length", node);
+        debug!("asking {} for blockchain length", node);
         let mut stream = nodes_connections.get_mut(&node).context("no node")?;
         let message = Message::AskDifference(0);
         message
             .send_async(&mut *stream)
             .await
             .context(format!("Failed to send AskDifference message to {}", node))?;
-        println!("sent AskDifference to {}", node);
+        debug!("sent AskDifference to {}", node);
         let message = Message::receive_async(&mut *stream).await?;
         match message {
             Message::Difference(count) => {
@@ -96,7 +96,7 @@ pub async fn download_blockchain(
                 blockchain.add_block(block)?;
             }
             _ => {
-                println!("unexpected message from {}", node);
+                warn!("unexpected message from {}", node);
             }
         }
     }
@@ -127,10 +127,10 @@ pub async fn save_blockchain(
     db: &Arc<BlockchainDB>,
     blockchain: &Arc<RwLock<Blockchain>>,
 ) -> Result<()> {
-    info!("saving blockchain to database...");
+    debug!("saving blockchain to database...");
 
     let blockchain = blockchain.read().await;
     db.save_blockchain(&*blockchain)?;
-    info!("blockchain saved to database");
+    debug!("blockchain saved to database");
     Ok(())
 }
