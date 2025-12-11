@@ -1,11 +1,34 @@
 use crate::context::NodeContext;
 use btclib::network::Message;
 use btclib::sha256::Hash;
-use btclib::types::{Block, BlockHeader, Transaction, TransactionOutput};
+use btclib::types::{Block, BlockHeader, Blockchain, Transaction, TransactionOutput};
 use btclib::util::MerkleRoot;
 use chrono::Utc;
 use tokio::net::TcpStream;
 use uuid::Uuid;
+
+fn get_last_block_hash(blockchain: &Blockchain) -> Hash {
+    blockchain
+        .blocks()
+        .last()
+        .map(|last_block| last_block.hash())
+        .unwrap_or(Hash::zero())
+}
+
+async fn broadcast_to_nodes<F>(ctx: &NodeContext, message_factory: F)
+where
+    F: Fn() -> Message,
+{
+    let nodes: Vec<_> = ctx.nodes.iter().map(|x| x.key().clone()).collect();
+    for node in nodes {
+        if let Some(mut stream) = ctx.nodes.get_mut(&node) {
+            let message = message_factory();
+            if message.send_async(&mut *stream).await.is_err() {
+                println!("failed to send message to {node}")
+            }
+        }
+    }
+}
 
 pub async fn handle_connection(ctx: NodeContext, mut socket: TcpStream) {
     loop {
@@ -85,12 +108,7 @@ pub async fn handle_connection(ctx: NodeContext, mut socket: TcpStream) {
             }
             ValidateTemplate(block_template) => {
                 let blockchain = ctx.blockchain.read().await;
-                let status = block_template.header.prev_block_hash
-                    == blockchain
-                        .blocks()
-                        .last()
-                        .map(|last_block| last_block.hash())
-                        .unwrap_or(Hash::zero());
+                let status = block_template.header.prev_block_hash == get_last_block_hash(&blockchain);
 
                 let message = TemplateValidity(status);
                 message.send_async(&mut socket).await.unwrap();
@@ -105,20 +123,8 @@ pub async fn handle_connection(ctx: NodeContext, mut socket: TcpStream) {
                 blockchain.rebuild_utxos();
                 println!("block looks good, broadcasting");
 
-                //send block to all nodes
-                let nodes = ctx
-                    .nodes
-                    .iter()
-                    .map(|x| x.key().clone())
-                    .collect::<Vec<_>>();
-                for node in nodes {
-                    if let Some(mut stream) = ctx.nodes.get_mut(&node) {
-                        let message = Message::NewBlock(block.clone());
-                        if message.send_async(&mut *stream).await.is_err() {
-                            println!("failed to send block to {node}")
-                        };
-                    }
-                }
+                let block_clone = block.clone();
+                broadcast_to_nodes(&ctx, || Message::NewBlock(block_clone.clone())).await;
             }
             SubmitTransaction(tx) => {
                 println!("submit tx");
@@ -128,66 +134,47 @@ pub async fn handle_connection(ctx: NodeContext, mut socket: TcpStream) {
                     return;
                 }
                 println!("added transaction to mempool");
-                // send transaction to all nodes
-                let nodes = ctx
-                    .nodes
-                    .iter()
-                    .map(|x| x.key().clone())
-                    .collect::<Vec<_>>();
-                for node in nodes {
-                    if let Some(mut stream) = ctx.nodes.get_mut(&node) {
-                        let message = Message::NewTransaction(tx.clone());
-                        if message.send_async(&mut *stream).await.is_err() {
-                            println!("failed to send transaction to {node}")
-                        };
-                    }
-                }
+                let tx_clone = tx.clone();
+                broadcast_to_nodes(&ctx, || Message::NewTransaction(tx_clone.clone())).await;
                 println!("transaction sent to all nodes");
             }
             FetchTemplate(pubkey) => {
                 let blockchain = ctx.blockchain.read().await;
-                let mut transactions = vec![];
+                
+                // Build transactions list: coinbase first, then mempool transactions
+                let mut transactions: Vec<Transaction> = blockchain
+                    .mempool()
+                    .iter()
+                    .take(btclib::BLOCK_TRANSACTION_CAP)
+                    .map(|(_, tx)| tx)
+                    .cloned()
+                    .collect();
 
-                // insert txs from mempool
-                transactions.extend(
-                    blockchain
-                        .mempool()
-                        .iter()
-                        .take(btclib::BLOCK_TRANSACTION_CAP)
-                        .map(|(_, tx)| tx)
-                        .cloned()
-                        .collect::<Vec<_>>(),
-                );
+                // Insert coinbase transaction at the beginning
+                let coinbase = Transaction {
+                    inputs: vec![],
+                    outputs: vec![TransactionOutput {
+                        pubkey,
+                        value: 0,
+                        unique_id: Uuid::new_v4(),
+                    }],
+                };
+                transactions.insert(0, coinbase);
 
-                // insert coinbase tx with pubkey
-                transactions.insert(
-                    0,
-                    Transaction {
-                        inputs: vec![],
-                        outputs: vec![TransactionOutput {
-                            pubkey,
-                            value: 0,
-                            unique_id: Uuid::new_v4(),
-                        }],
-                    },
-                );
-
-                let merkle_root = MerkleRoot::calculate(&transactions);
+                // Create block with placeholder merkle root (will be calculated after coinbase value is set)
+                let prev_block_hash = get_last_block_hash(&blockchain);
                 let mut block = Block::new(
                     BlockHeader {
                         timestamp: Utc::now(),
                         nonce: 0,
-                        prev_block_hash: blockchain
-                            .blocks()
-                            .last()
-                            .map(|last_block| last_block.hash())
-                            .unwrap_or(Hash::zero()),
-                        merkle_root,
+                        prev_block_hash,
+                        merkle_root: MerkleRoot::calculate(&[]),
                         target: blockchain.target(),
                     },
                     transactions,
                 );
 
+                // Calculate miner fees and update coinbase value
                 let miner_fees = match block.calculate_miner_fees(blockchain.utxos()) {
                     Ok(fees) => fees,
                     Err(e) => {
@@ -196,10 +183,10 @@ pub async fn handle_connection(ctx: NodeContext, mut socket: TcpStream) {
                     }
                 };
 
-                // TODO check btclib to prevent calculating merkle tree twice
                 let reward = blockchain.calculate_block_reward();
                 block.transactions[0].outputs[0].value = reward + miner_fees;
 
+                // Calculate merkle root once after coinbase value is finalized
                 block.header.merkle_root = MerkleRoot::calculate(&block.transactions);
 
                 let message = Template(block);
