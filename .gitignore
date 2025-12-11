@@ -25,3 +25,4 @@ wallet/logs
 **/*.priv.*
 **/*.pub.*
 **/*.cbor
+/keys
