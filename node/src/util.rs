@@ -78,22 +78,26 @@ pub async fn find_longest_chain_node(
     Ok((longest_name, longest_count as u32))
 }
 
-// FetchAllBlocks message type returns an entire chain of blocks
-pub async fn download_blockchain(ctx: &NodeContext, node: &str, _count: u32) -> Result<()> {
-    let mut stream = ctx.nodes.get_mut(node).unwrap();
-    let message = Message::FetchAllBlocks;
-    message.send_async(&mut *stream).await?;
-    let message = Message::receive_async(&mut *stream).await?;
-    match message {
-        Message::AllBlocks(blocks) => {
-            println!("received {} blocks from {}", blocks.len(), node);
-            let mut blockchain = ctx.blockchain.write().await;
-            for block in blocks {
+// TODO add another message type that would return an entire chain of blocks
+pub async fn download_blockchain(
+    nodes_connections: &Arc<DashMap<String, TcpStream>>,
+    blockchain: &Arc<RwLock<Blockchain>>,
+    node: &str,
+    count: u32,
+) -> Result<()> {
+    let mut stream = nodes_connections.get_mut(node).unwrap();
+    for i in 0..count as usize {
+        let message = Message::FetchBlock(i);
+        message.send_async(&mut *stream).await?;
+        let message = Message::receive_async(&mut *stream).await?;
+        match message {
+            Message::NewBlock(block) => {
+                let mut blockchain = blockchain.write().await;
                 blockchain.add_block(block)?;
             }
-        }
-        _ => {
-            anyhow::bail!("unexpected message from {}", node);
+            _ => {
+                warn!("unexpected message from {}", node);
+            }
         }
     }
     Ok(())
