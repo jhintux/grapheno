@@ -1,14 +1,32 @@
 use anyhow::Result;
 use argh::FromArgs;
-use btclib::types::Blockchain;
-use dashmap::DashMap;
-use static_init::dynamic;
-use std::path::Path;
-use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::RwLock;
+use tokio::net::TcpListener;
+use tracing::info;
+use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
+mod context;
+mod database;
 mod handler;
 mod util;
+
+fn init_tracing() -> Result<()> {
+    // Create a formatting layer for tracing output with a compact format
+    let fmt_layer = fmt::layer().compact();
+
+    // Create a filter layer to control the verbosity of logs
+    // Try to get the filter configuration from the environment variables
+    // If it fails, default to the "info" log level
+    let filter_layer = EnvFilter::try_from_default_env().or_else(|_| EnvFilter::try_new("info"))?;
+
+    // Build the tracing subscriber registry with the formatting layer,
+    // the filter layer, and the error layer for enhanced error reporting
+    tracing_subscriber::registry()
+        .with(filter_layer) // Add the filter layer to control log verbosity
+        .with(fmt_layer) // Add the formatting layer for compact log output
+        .init(); // Initialize the tracing subscriber
+
+    Ok(())
+}
 
 #[derive(FromArgs)]
 /// A toy blockchain node
@@ -16,67 +34,44 @@ struct Args {
     #[argh(option, default = "9000")]
     /// port number
     port: u16,
-    #[argh(option, default = "String::from(\"./blockchain.cbor\")")]
-    /// blockchain file location
-    blockchain_file: String,
+    #[argh(option, default = "String::from(\"./blockchain_db\")")]
+    /// blockchain database directory
+    db_path: String,
     #[argh(positional)]
     /// addresses of initial nodes
     nodes: Vec<String>,
 }
 
-#[dynamic]
-pub static BLOCKCHAIN: RwLock<Blockchain> = RwLock::new(Blockchain::new());
-#[dynamic]
-pub static NODES: DashMap<String, TcpStream> = DashMap::new();
-
 #[tokio::main]
 async fn main() -> Result<()> {
+    init_tracing()?;
+    
     let args: Args = argh::from_env();
 
     // Access the parsed arguments
     let port = args.port;
-    let blockchain_file = args.blockchain_file;
+    let db_path = args.db_path;
     let nodes = args.nodes;
 
-    if Path::new(&blockchain_file).exists() {
-        util::load_blockchain(&blockchain_file).await?;
-    } else {
-        println!("blockchain file does not exist");
-        util::populate_connections(&nodes).await?;
-        println!("total amount of known nodes: {}", NODES.len());
-
-        if nodes.is_empty() {
-            println!("no initial nodes provided, starting as a seed node");
-        } else {
-            let (longest_name, longest_count) = util::find_longest_chain_node().await?;
-
-            util::download_blockchain(&longest_name, longest_count).await?;
-
-            println!("blockchain downloaded, from {}", longest_name);
-
-            {
-                let mut blockchain = BLOCKCHAIN.write().await;
-                blockchain.rebuild_utxos();
-            }
-
-            {
-                let mut blockchain = BLOCKCHAIN.write().await;
-                blockchain.try_adjust_target();
-            }
-        }
-    }
+    // Initialize database and blockchain
+    let ctx = context::NodeContext::new(&db_path, &nodes).await?;
 
     let addr = format!("0.0.0.0:{}", port);
     let listener = TcpListener::bind(&addr).await?;
-    println!("Listening on {}", addr);
+    info!("Listening on {}", addr);
+
+    // Clone context for background tasks
+    let ctx_cleanup = ctx.clone();
+    let ctx_save = ctx.clone();
 
     // start a task to periodically cleanup the mempool. Normally, you would want to keep and join the handle
-    tokio::spawn(util::cleanup());
+    tokio::spawn(util::cleanup(ctx_cleanup));
     // and a task to periodically save the blockchain
-    tokio::spawn(util::save(blockchain_file.clone()));
+    tokio::spawn(util::save(ctx_save));
 
     loop {
         let (socket, _) = listener.accept().await?;
-        tokio::spawn(handler::handle_connection(socket));
+        let ctx_handle = ctx.clone();
+        tokio::spawn(handler::handle_connection(ctx_handle, socket));
     }
 }

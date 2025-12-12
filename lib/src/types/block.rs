@@ -10,6 +10,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{Read, Write, Result as IoResult, Error as IoError, ErrorKind as IoErrorKind};
+use tracing::warn;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Block {
@@ -52,13 +53,13 @@ impl Block {
                     .map(|(_, output)| output);
 
                 if prev_output.is_none() {
-                    println!("Previous output not found");
+                    warn!("Previous output not found");
                     return Err(BtcError::InvalidTransactionInput);
                 }
 
                 let prev_output = prev_output.unwrap();
                 if inputs.contains_key(&input.prev_transaction_output_hash) {
-                    println!("Previous output already used");
+                    warn!("Previous output already used");
                     return Err(BtcError::InvalidTransactionInput);
                 }
 
