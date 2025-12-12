@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use ciborium::{ser::into_writer, de::from_reader};
 use hex;
 use btclib::types::Blockchain;
+use tracing::instrument;
 
 /// Database keys for different data types
 mod keys {
@@ -33,6 +34,7 @@ pub struct BlockchainDB {
 
 impl BlockchainDB {
     /// Open or create a new database at the given path
+    #[instrument(skip_all, fields(path = %path.as_ref().to_string_lossy()))]
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let db = sled::open(path)
             .context("Failed to open/create database")?;
@@ -44,6 +46,7 @@ impl BlockchainDB {
     }
 
     /// Store a block at the given index
+    #[instrument(skip(self, block))]
     pub fn put_block(&self, index: u64, block: &Block) -> Result<()> {
         let key = format!("{}{}", keys::BLOCK_PREFIX, index);
         
@@ -58,6 +61,7 @@ impl BlockchainDB {
     }
 
     /// Retrieve a block at the given index
+    #[instrument(skip(self))]
     pub fn get_block(&self, index: u64) -> Result<Option<Block>> {
         let key = format!("{}{}", keys::BLOCK_PREFIX, index);
         
@@ -72,6 +76,7 @@ impl BlockchainDB {
     }
 
     /// Get all blocks in order
+    #[instrument(skip(self))]
     pub fn get_all_blocks(&self) -> Result<Vec<Block>> {
         let mut blocks = Vec::new();
         let mut index = 0u64;
@@ -88,6 +93,7 @@ impl BlockchainDB {
     }
 
     /// Store a UTXO
+    #[instrument(skip(self, hash, output))]
     pub fn put_utxo(&self, hash: &Hash, marked: bool, output: &TransactionOutput) -> Result<()> {
         let hash_bytes = hash.as_bytes();
         let hash_hex = hex::encode(hash_bytes);
@@ -113,6 +119,7 @@ impl BlockchainDB {
     }
 
     /// Retrieve a UTXO
+    #[instrument(skip(self, hash))]
     pub fn get_utxo(&self, hash: &Hash) -> Result<Option<(bool, TransactionOutput)>> {
         let hash_bytes = hash.as_bytes();
         let hash_hex = hex::encode(hash_bytes);
@@ -129,6 +136,7 @@ impl BlockchainDB {
     }
 
     /// Delete a UTXO
+    #[instrument(skip(self, hash))]
     pub fn delete_utxo(&self, hash: &Hash) -> Result<()> {
         let hash_bytes = hash.as_bytes();
         let hash_hex = hex::encode(hash_bytes);
@@ -149,6 +157,7 @@ impl BlockchainDB {
     }
 
     /// Get all UTXOs
+    #[instrument(skip(self))]
     pub fn get_all_utxos(&self) -> Result<HashMap<Hash, (bool, TransactionOutput)>> {
         let mut utxos = HashMap::new();
         
@@ -164,6 +173,7 @@ impl BlockchainDB {
 
     /// Store a mempool transaction
     /// Uses hash + timestamp as key to preserve duplicate transactions with different timestamps
+    #[instrument(skip(self, tx_hash, tx))]
     pub fn put_mempool_tx(&self, tx_hash: &Hash, timestamp: DateTime<Utc>, tx: &Transaction) -> Result<()> {
         let hash_bytes = tx_hash.as_bytes();
         let hash_hex = hex::encode(hash_bytes);
@@ -193,6 +203,7 @@ impl BlockchainDB {
     }
 
     /// Retrieve a mempool transaction by hash and timestamp
+    #[instrument(skip(self, tx_hash))]
     pub fn get_mempool_tx(&self, tx_hash: &Hash, timestamp: DateTime<Utc>) -> Result<Option<(DateTime<Utc>, Transaction)>> {
         let hash_bytes = tx_hash.as_bytes();
         let hash_hex = hex::encode(hash_bytes);
@@ -210,6 +221,7 @@ impl BlockchainDB {
     }
 
     /// Delete a mempool transaction by hash and timestamp
+    #[instrument(skip(self, tx_hash))]
     pub fn delete_mempool_tx(&self, tx_hash: &Hash, timestamp: DateTime<Utc>) -> Result<()> {
         let hash_bytes = tx_hash.as_bytes();
         let hash_hex = hex::encode(hash_bytes);
@@ -232,6 +244,7 @@ impl BlockchainDB {
     }
 
     /// Get all mempool transactions
+    #[instrument(skip(self))]
     pub fn get_all_mempool_txs(&self) -> Result<Vec<(DateTime<Utc>, Transaction)>> {
         let mut mempool = Vec::new();
         
@@ -246,6 +259,7 @@ impl BlockchainDB {
     }
 
     /// Store the target value
+    #[instrument(skip(self))]
     pub fn put_target(&self, target: U256) -> Result<()> {
         let mut value = Vec::new();
         into_writer(&target, &mut value)
@@ -258,6 +272,7 @@ impl BlockchainDB {
     }
 
     /// Retrieve the target value
+    #[instrument(skip(self))]
     pub fn get_target(&self) -> Result<Option<U256>> {
         match self.db.get(keys::META_TARGET.as_bytes()).context("Failed to read target from database")? {
             Some(value) => {
@@ -270,6 +285,7 @@ impl BlockchainDB {
     }
 
     /// Store the block count
+    #[instrument(skip(self))]
     pub fn put_block_count(&self, count: u64) -> Result<()> {
         let value = count.to_be_bytes().to_vec();
         
@@ -280,6 +296,7 @@ impl BlockchainDB {
     }
 
     /// Retrieve the block count
+    #[instrument(skip(self))]
     pub fn get_block_count(&self) -> Result<Option<u64>> {
         match self.db.get(keys::META_BLOCK_COUNT.as_bytes()).context("Failed to read block count from database")? {
             Some(value) => {
@@ -296,6 +313,7 @@ impl BlockchainDB {
     }
 
     /// Store UTXO keys list
+    #[instrument(skip(self, keys))]
     fn put_utxo_keys(&self, keys: &[Hash]) -> Result<()> {
         let mut value = Vec::new();
         into_writer(keys, &mut value)
@@ -308,6 +326,7 @@ impl BlockchainDB {
     }
 
     /// Get UTXO keys list
+    #[instrument(skip(self))]
     fn get_utxo_keys(&self) -> Result<Option<Vec<Hash>>> {
         match self.db.get(keys::META_UTXO_KEYS.as_bytes()).context("Failed to read UTXO keys from database")? {
             Some(value) => {
@@ -320,6 +339,7 @@ impl BlockchainDB {
     }
 
     /// Store mempool keys list (hash, timestamp) pairs to preserve duplicates
+    #[instrument(skip(self, keys))]
     fn put_mempool_keys(&self, keys: &[(Hash, DateTime<Utc>)]) -> Result<()> {
         let mut value = Vec::new();
         into_writer(keys, &mut value)
@@ -332,6 +352,7 @@ impl BlockchainDB {
     }
 
     /// Get mempool keys list (hash, timestamp) pairs
+    #[instrument(skip(self))]
     fn get_mempool_keys(&self) -> Result<Option<Vec<(Hash, DateTime<Utc>)>>> {
         match self.db.get(keys::META_MEMPOOL_KEYS.as_bytes()).context("Failed to read mempool keys from database")? {
             Some(value) => {
@@ -344,6 +365,7 @@ impl BlockchainDB {
     }
 
     /// Clear all mempool transactions (for cleanup)
+    #[instrument(skip(self))]
     pub fn clear_mempool(&self) -> Result<()> {
         let mempool_keys = self.get_mempool_keys()?.unwrap_or_default();
         for (tx_hash, timestamp) in mempool_keys {
@@ -353,6 +375,7 @@ impl BlockchainDB {
     }
 
     /// Load the entire blockchain from the database
+    #[instrument(skip(self))]
     pub fn load_blockchain(&self) -> Result<Blockchain> {
         
         let blocks = self.get_all_blocks()?;
@@ -379,6 +402,7 @@ impl BlockchainDB {
     }
 
     /// Save the entire blockchain to the database
+    #[instrument(skip(self, blockchain))]
     pub fn save_blockchain(&self, blockchain: &Blockchain) -> Result<()> {
         // Save all blocks
         for (index, block) in blockchain.blocks().enumerate() {

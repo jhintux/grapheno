@@ -3,17 +3,32 @@ use anyhow::Result;
 use std::panic;
 use std::path::PathBuf;
 use tracing::*;
-use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
-/// Initialize tracing to save logs into the logs/ folder
-pub fn setup_tracing() -> Result<()> {
-    let file_appender = RollingFileAppender::new(Rotation::DAILY, "logs", "wallet.log");
+/// Initialize tracing with compact format and environment-based filtering
+pub fn init_tracing() -> Result<()> {
+    // Create a formatting layer for tracing output with a compact format
+    let fmt_layer = fmt::layer().compact();
+
+    // Create a filter layer to control the verbosity of logs
+    // Try to get the filter configuration from the environment variables
+    // If it fails, default to the "info" log level
+    let filter_layer = EnvFilter::try_from_default_env().or_else(|_| EnvFilter::try_new("info"))?;
+
+    // Build the tracing subscriber registry with the formatting layer,
+    // the filter layer, and the error layer for enhanced error reporting
     tracing_subscriber::registry()
-        .with(fmt::layer().with_writer(file_appender))
-        .with(EnvFilter::from_default_env().add_directive(tracing::Level::TRACE.into()))
-        .init();
+        .with(filter_layer) // Add the filter layer to control log verbosity
+        .with(fmt_layer) // Add the formatting layer for compact log output
+        .init(); // Initialize the tracing subscriber
+
     Ok(())
+}
+
+/// Initialize tracing to save logs into the logs/ folder (legacy function for compatibility)
+#[allow(dead_code)]
+pub fn setup_tracing() -> Result<()> {
+    init_tracing()
 }
 
 /// Make sure tracing is able to log panics occurring in the wallet
@@ -47,7 +62,7 @@ pub fn generate_dummy_config(path: &PathBuf) -> Result<()> {
     };
     let config_str = toml::to_string_pretty(&dummy_config)?;
     std::fs::write(path, config_str)?;
-    println!("Dummy config generated at: {}", path.display());
+    info!("Dummy config generated at: {}", path.display());
     Ok(())
 }
 

@@ -10,7 +10,8 @@ use bigdecimal::BigDecimal;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::io::{Error as IoError, ErrorKind as IoErrorKind, Read, Result as IoResult, Write};
+use std::io::{Read, Write, Result as IoResult, Error as IoError, ErrorKind as IoErrorKind};
+use tracing::{instrument, warn, error};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Blockchain {
@@ -52,40 +53,41 @@ impl Blockchain {
         &self.mempool
     }
 
+    #[instrument(skip(self, block))]
     pub fn add_block(&mut self, block: Block) -> Result<()> {
         if self.blocks.is_empty() {
             // Genesis block validation
             if block.header.prev_block_hash != Hash::zero() {
-                println!("Genesis block must have a hash of 0");
+                warn!("Genesis block must have a hash of 0");
                 return Err(BtcError::InvalidBlock);
             }
         } else {
             let last_block = self.blocks.last().unwrap();
             if block.header.prev_block_hash != last_block.hash() {
-                println!("Previous block hash does not match the last block hash");
+                warn!("Previous block hash does not match the last block hash");
                 return Err(BtcError::InvalidBlock);
             }
 
             if !block.header.hash().matches_target(block.header.target) {
-                println!("Block hash does not match the target");
+                warn!("Block hash does not match the target");
                 return Err(BtcError::InvalidBlock);
             }
 
             let calculated_merkle_root = MerkleRoot::calculate(&block.transactions);
             if calculated_merkle_root != block.header.merkle_root {
-                println!("Calculated merkle root does not match the block header merkle root");
+                warn!("Calculated merkle root does not match the block header merkle root");
                 return Err(BtcError::InvalidMerkleRoot);
             }
 
             if block.header.timestamp <= last_block.header.timestamp {
-                println!("Timestamp is not greater than the last block timestamp");
+                warn!("Timestamp is not greater than the last block timestamp");
                 return Err(BtcError::InvalidBlock);
             }
 
             block
                 .verify_transactions(self.block_height(), &self.utxos)
                 .map_err(|e| {
-                    println!("Transaction verification failed: {:?}", e);
+                    error!("Transaction verification failed: {:?}", e);
                     e
                 })?;
         }
@@ -101,6 +103,7 @@ impl Blockchain {
         Ok(())
     }
 
+    #[instrument(skip(self))]
     pub fn rebuild_utxos(&mut self) {
         for block in &self.blocks {
             for transaction in &block.transactions {
@@ -116,6 +119,7 @@ impl Blockchain {
         }
     }
 
+    #[instrument(skip(self))]
     pub fn try_adjust_target(&mut self) {
         if self.blocks.is_empty() {
             return;
@@ -160,6 +164,7 @@ impl Blockchain {
         self.target = new_target.min(crate::MIN_TARGET);
     }
 
+    #[instrument(skip(self, transaction))]
     pub fn add_to_mempool(&mut self, transaction: Transaction) -> Result<()> {
         let mut known_inputs = HashSet::new();
 
@@ -290,6 +295,7 @@ impl Blockchain {
 
     // Cleanup mempool - remove transactions older than
     // MAX_MEMPOOL_TRANSACTION_AGE
+    #[instrument(skip(self))]
     pub fn cleanup_mempool(&mut self) {
         let now = Utc::now();
         let mut utxo_hashes_to_unmark: Vec<Hash> = vec![];
@@ -318,6 +324,7 @@ impl Blockchain {
         }
     }
 
+    #[instrument(skip(self))]
     pub fn calculate_block_reward(&self) -> u64 {
         let block_height = self.block_height();
         let halvings = block_height / crate::HALVING_INTERVAL;

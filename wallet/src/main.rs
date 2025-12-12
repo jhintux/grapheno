@@ -6,7 +6,7 @@ use core::Core;
 use kanal;
 use std::path::PathBuf;
 use std::sync::Arc;
-use util::{generate_dummy_config, setup_tracing, setup_panic_hook, big_mode_btc};
+use util::{generate_dummy_config, init_tracing, setup_panic_hook, big_mode_btc};
 use tasks::{update_utxos, handle_transactions, ui_task, update_balance};
 
 mod core;
@@ -34,7 +34,7 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    setup_tracing()?;
+    init_tracing()?;
     setup_panic_hook();
     info!("Starting wallet app");
 
