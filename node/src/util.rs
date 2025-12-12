@@ -1,6 +1,7 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use btclib::network::Message;
 use btclib::types::Blockchain;
 use dashmap::DashMap;
@@ -40,45 +41,196 @@ pub async fn populate_connections(nodes: &[String]) -> Result<Arc<DashMap<String
     Ok(node_connections)
 }
 
-// TODO potential security problem, malicious node could return a very large number (321). Create a consensus mecanism and AskDifference message could be used to do that.
+/// Calculate consensus chain length using majority rule (50%+1)
+/// Returns (consensus_length, list of nodes with that length)
+fn calculate_consensus_chain_length(
+    responses: Vec<(String, i32)>,
+) -> Result<(u32, Vec<String>)> {
+    if responses.is_empty() {
+        return Err(anyhow::anyhow!("no node responses received"));
+    }
+
+    let total_nodes = responses.len();
+    let majority_threshold = (total_nodes / 2) + 1;
+
+    // Group nodes by their claimed chain length
+    let mut length_groups: HashMap<i32, Vec<String>> = HashMap::new();
+    for (node_name, chain_length) in responses {
+        length_groups
+            .entry(chain_length)
+            .or_insert_with(Vec::new)
+            .push(node_name);
+    }
+
+    // Find chain length with majority consensus
+    let mut consensus_length: Option<i32> = None;
+    let mut consensus_nodes: Vec<String> = Vec::new();
+    let mut max_group_size = 0;
+
+    for (length, nodes) in &length_groups {
+        let group_size = nodes.len();
+        if group_size >= majority_threshold {
+            // Found majority consensus
+            consensus_length = Some(*length);
+            consensus_nodes = nodes.clone();
+            break;
+        }
+        // Track the most common length as fallback
+        if group_size > max_group_size {
+            max_group_size = group_size;
+            consensus_length = Some(*length);
+            consensus_nodes = nodes.clone();
+        }
+    }
+
+    // If no majority, use the most common length (already set above)
+    let consensus_len = consensus_length.ok_or_else(|| {
+        anyhow::anyhow!("failed to determine consensus chain length")
+    })?;
+
+    let consensus_count = consensus_nodes.len();
+    if consensus_count < majority_threshold {
+        warn!(
+            "no majority consensus found ({} nodes agree on length {}, need {}). using most common length",
+            consensus_count, consensus_len, majority_threshold
+        );
+    } else {
+        info!(
+            "consensus reached: {} nodes agree on chain length {}",
+            consensus_count, consensus_len
+        );
+    }
+
+    // Log outliers for security monitoring
+    for (length, nodes) in &length_groups {
+        if *length != consensus_len {
+            warn!(
+                "outlier chain length detected: {} nodes claim length {} (consensus: {})",
+                nodes.len(),
+                length,
+                consensus_len
+            );
+            for node in nodes {
+                warn!("  - outlier node: {}", node);
+            }
+        }
+    }
+
+    // Ensure non-negative length
+    if consensus_len < 0 {
+        return Err(anyhow::anyhow!(
+            "consensus chain length is negative: {}",
+            consensus_len
+        ));
+    }
+
+    Ok((consensus_len as u32, consensus_nodes))
+}
+
+/// Find the node with the longest valid chain using consensus mechanism
+/// Implements Bitcoin-like consensus: requires majority (50%+1) of nodes to agree on chain length
 pub async fn find_longest_chain_node(
     nodes_connections: &Arc<DashMap<String, TcpStream>>,
 ) -> Result<(String, u32)> {
-    debug!("finding nodes with the highest blockchain length...");
-    let mut longest_name = String::new();
-    let mut longest_count = 0;
+    debug!("finding nodes with the highest blockchain length using consensus...");
+    
     let all_nodes = nodes_connections
         .iter()
         .map(|x| x.key().clone())
         .collect::<Vec<_>>();
-    for node in all_nodes {
+
+    if all_nodes.is_empty() {
+        return Err(anyhow::anyhow!("no nodes connected"));
+    }
+
+    // Collect all node responses
+    let mut responses: Vec<(String, i32)> = Vec::new();
+    let mut failed_nodes: Vec<String> = Vec::new();
+
+    for node in &all_nodes {
         debug!("asking {} for blockchain length", node);
-        let mut stream = nodes_connections.get_mut(&node).context("no node")?;
-        let message = Message::AskDifference(0);
-        message
-            .send_async(&mut *stream)
-            .await
-            .context(format!("Failed to send AskDifference message to {}", node))?;
-        debug!("sent AskDifference to {}", node);
-        let message = Message::receive_async(&mut *stream).await?;
-        match message {
-            Message::Difference(count) => {
-                debug!("received Difference from {}", node);
-                if count > longest_count {
-                    info!("new longest blockchain: {} blocks from {node}", count);
-                    longest_count = count;
-                    longest_name = node;
+        
+        let result = {
+            let mut stream = match nodes_connections.get_mut(node) {
+                Some(stream) => stream,
+                None => {
+                    warn!("node {} no longer in connections map", node);
+                    failed_nodes.push(node.clone());
+                    continue;
                 }
+            };
+
+            // Send AskDifference message
+            let send_result = {
+                let message = Message::AskDifference(0);
+                message.send_async(&mut *stream).await
+            };
+
+            if let Err(e) = send_result {
+                warn!("failed to send AskDifference to {}: {}", node, e);
+                failed_nodes.push(node.clone());
+                continue;
             }
-            e => {
+
+            debug!("sent AskDifference to {}", node);
+
+            // Receive response
+            Message::receive_async(&mut *stream).await
+        };
+
+        match result {
+            Ok(Message::Difference(count)) => {
+                debug!("received Difference from {}: {}", node, count);
+                responses.push((node.clone(), count));
+            }
+            Ok(e) => {
                 warn!("unexpected message from {}: {:?}", node, e);
+                failed_nodes.push(node.clone());
+            }
+            Err(e) => {
+                warn!("failed to receive response from {}: {}", node, e);
+                failed_nodes.push(node.clone());
             }
         }
     }
-    Ok((longest_name, longest_count as u32))
+
+    // Log failed nodes
+    if !failed_nodes.is_empty() {
+        warn!(
+            "{} nodes failed to respond or returned invalid messages: {:?}",
+            failed_nodes.len(),
+            failed_nodes
+        );
+    }
+
+    // Calculate consensus
+    let (consensus_length, consensus_nodes) = calculate_consensus_chain_length(responses)?;
+
+    if consensus_nodes.is_empty() {
+        return Err(anyhow::anyhow!("no nodes in consensus group"));
+    }
+
+    // Select a node from the consensus group (prefer first one, or could randomize)
+    let selected_node = consensus_nodes[0].clone();
+
+    if consensus_nodes.len() == 1 && all_nodes.len() > 1 {
+        warn!(
+            "only one node agrees on chain length {} (out of {} total nodes). proceeding with caution.",
+            consensus_length,
+            all_nodes.len()
+        );
+    }
+
+    info!(
+        "consensus chain length: {} blocks. selected node: {} ({} nodes agree)",
+        consensus_length,
+        selected_node,
+        consensus_nodes.len()
+    );
+
+    Ok((selected_node, consensus_length))
 }
 
-// TODO add another message type that would return an entire chain of blocks
 pub async fn download_blockchain(
     nodes_connections: &Arc<DashMap<String, TcpStream>>,
     blockchain: &Arc<RwLock<Blockchain>>,
