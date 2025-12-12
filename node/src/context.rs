@@ -45,14 +45,13 @@ impl NodeContext {
             if nodes.is_empty() {
                 info!("no initial nodes provided, starting as a seed node");
             } else {
-                let (longest_name, longest_count) =
+                let (longest_name, _) =
                     find_longest_chain_node(&connections).await?;
 
                 download_blockchain(
                     &connections,
                     &blockchain,
-                    &longest_name,
-                    longest_count,
+                    &longest_name
                 )
                 .await?;
 

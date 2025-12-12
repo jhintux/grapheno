@@ -83,21 +83,20 @@ pub async fn download_blockchain(
     nodes_connections: &Arc<DashMap<String, TcpStream>>,
     blockchain: &Arc<RwLock<Blockchain>>,
     node: &str,
-    count: u32,
 ) -> Result<()> {
     let mut stream = nodes_connections.get_mut(node).unwrap();
-    for i in 0..count as usize {
-        let message = Message::FetchBlock(i);
-        message.send_async(&mut *stream).await?;
-        let message = Message::receive_async(&mut *stream).await?;
-        match message {
-            Message::NewBlock(block) => {
+    let message = Message::FetchAllBlocks;
+    message.send_async(&mut *stream).await?;
+    let message = Message::receive_async(&mut *stream).await?;
+    match message {
+        Message::AllBlocks(blocks) => {
+            for block in blocks {
                 let mut blockchain = blockchain.write().await;
                 blockchain.add_block(block)?;
             }
-            _ => {
-                warn!("unexpected message from {}", node);
-            }
+        }
+        _ => {
+            warn!("unexpected message from {}", node);
         }
     }
     Ok(())
