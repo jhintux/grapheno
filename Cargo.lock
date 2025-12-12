@@ -200,6 +200,7 @@ dependencies = [
  "sha256",
  "thiserror",
  "tokio",
+ "tracing",
  "uint",
  "uuid",
 ]
@@ -1033,6 +1034,8 @@ dependencies = [
  "sled",
  "static_init",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
  "uuid",
 ]
 
