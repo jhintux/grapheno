@@ -63,9 +63,17 @@ impl Block {
                     return Err(BtcError::InvalidTransactionInput);
                 }
 
+                // Verify address matches: hash the input's public key and compare with output address
+                let computed_address = input.public_key.to_address();
+                if computed_address != prev_output.address {
+                    warn!("Address mismatch: computed {} != output {}", computed_address, prev_output.address);
+                    return Err(BtcError::InvalidSignature);
+                }
+
+                // Verify signature
                 if !input
                     .signature
-                    .verify(&input.prev_transaction_output_hash, &prev_output.pubkey)
+                    .verify(&input.prev_transaction_output_hash, &input.public_key)
                 {
                     return Err(BtcError::InvalidSignature);
                 }

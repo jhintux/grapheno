@@ -40,18 +40,33 @@ This is a Cargo workspace containing the following components:
 
 ### Step 1: Generate Key Pair
 
-First, you need to generate a key pair for your wallet. The `key_gen` utility creates both a private key (`.priv.cbor`) and a public key (`.pub.pem`).
+First, you need to generate a key pair for your wallet. The `key_gen` utility creates both a private key (`.priv.cbor`) and a public key (`.pub.pem`), and displays the Bitcoin-style address.
 
 From the project root directory, run:
 
 ```bash
-# Generate keys (replace 'alice' with your preferred name)
-cargo run --bin key_gen -- alice
+# Generate keys (default saves to "keys" folder)
+cargo run --bin key_gen
 ```
 
-This will create in `wallet` folder:
-- `alice.priv.cbor` - Your private key (keep this secure!)
-- `alice.pub.pem` - Your public key
+When prompted:
+- Enter directory path (default: `./keys`)
+- Enter a name for the key pair (default: `default`)
+
+This will create in the `keys` folder:
+- `{name}.priv.cbor` - Your private key (keep this secure!)
+- `{name}.pub.pem` - Your public key
+- Display your Bitcoin address (e.g., `18VvDB8FnwU4symRpFSjbFoDJFyzQyHWVV`)
+
+**Example:**
+```bash
+# Generate a key pair named "node"
+cargo run --bin key_gen
+# Enter: keys (or press Enter for default)
+# Enter: node (or press Enter for default)
+```
+
+This creates `keys/node.priv.cbor` and `keys/node.pub.pem`, and shows your address.
 
 ### Step 2: Start the Node
 
@@ -89,9 +104,36 @@ The miner will:
 - Submit successfully mined blocks back to the node
 - Create the genesis block automatically when mining the first block
 
-**Note:** Make sure the miner's public key file path is correct. The miner will receive the block reward (coinbase transaction) to the address associated with this public key.
+**Note:** Make sure the miner's public key file path is correct. The miner will receive the block reward (coinbase transaction) to the Bitcoin address derived from this public key.
 
-### Step 4: Start the Wallet
+### Step 4: Configure the Wallet
+
+Before starting the wallet, configure it by editing `wallet/wallet_config.toml`:
+
+```toml
+# Your keys (stored in "keys" folder by default)
+my_keys = [
+    { public = "keys/node.pub.pem", private = "keys/node.priv.cbor" }
+]
+default_node = "127.0.0.1:9000"
+
+# Contacts use Bitcoin addresses (no public key files needed)
+[[contacts]]
+name = "Alice"
+address = "18VvDB8FnwU4symRpFSjbFoDJFyzQyHWVV"
+
+[[contacts]]
+name = "Bob"
+address = "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"
+
+[fee_config]
+fee_type = "Percent"
+value = 0.1
+```
+
+**Important:** Update `my_keys` with the paths to your generated key files, and add contacts with their Bitcoin addresses.
+
+### Step 5: Start the Wallet
 
 In another terminal, navigate to the wallet directory and start the wallet application:
 
@@ -104,16 +146,22 @@ The wallet will:
 - Load your keys from `wallet_config.toml`
 - Connect to the specified node
 - Display your balance in the TUI
-- Allow you to send transactions
+- Allow you to send transactions to addresses or contacts
 
 **Wallet Controls:**
 - Press `Esc` to access the menu bar
 - Use `Send` from the menu to create and send transactions
+- Use `Contacts` from the menu to manage your address book
 - Press `q` to quit
 
-### Step 5: View Your Balance
+**Sending Transactions:**
+- You can send to a contact by name (e.g., "Alice")
+- You can send to any valid Bitcoin address (e.g., "18VvDB8FnwU4symRpFSjbFoDJFyzQyHWVV")
+- If you send to a new address, you'll be prompted to add it as a contact
 
-Once the miner has successfully mined the genesis block (and any subsequent blocks), your wallet will display the balance associated with your public key. The balance updates automatically as new blocks are mined and transactions are processed.
+### Step 6: View Your Balance
+
+Once the miner has successfully mined the genesis block (and any subsequent blocks), your wallet will display the balance associated with your Bitcoin address. The balance updates automatically as new blocks are mined and transactions are processed.
 
 ## Running Multiple Nodes
 
@@ -177,26 +225,46 @@ Available options:
 
 ### Wallet Configuration
 
-The wallet uses `wallet_config.toml` for configuration. An example configuration:
+The wallet uses `wallet_config.toml` for configuration. The configuration uses **Bitcoin-style addresses** instead of public key files for contacts.
+
+**Address-Based System:**
+- Transaction outputs store addresses (hashed public keys) instead of full public keys
+- Public keys are only revealed when spending (better privacy)
+- Contacts only need a name and Bitcoin address (no public key files required)
+
+**Example Configuration:**
 
 ```toml
+# Your keys (stored in "keys" folder by default)
 my_keys = [
-    { public = "alice.pub.pem", private = "alice.priv.cbor" }
+    { public = "keys/node.pub.pem", private = "keys/node.priv.cbor" }
 ]
 default_node = "127.0.0.1:9000"
 
+# Contacts use Bitcoin addresses (Base58Check encoded)
+# No public key files needed - just name and address
 [[contacts]]
 name = "Alice"
-key = "alice.pub.pem"
+address = "18VvDB8FnwU4symRpFSjbFoDJFyzQyHWVV"
 
 [[contacts]]
 name = "Bob"
-key = "bob.pub.pem"
+address = "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"
 
 [fee_config]
 fee_type = "Percent"
 value = 0.1
 ```
+
+**Getting Addresses:**
+- When you generate a key with `key_gen`, it displays the Bitcoin address
+- You can share this address with others to receive funds
+- Add addresses to your contacts for easier sending
+
+**Managing Contacts:**
+- Use the `Contacts` menu in the wallet TUI to view, add, or remove contacts
+- When sending to a new address, you'll be prompted to add it as a contact
+- Contacts are automatically saved to `wallet_config.toml`
 
 You can generate a default config file:
 
@@ -236,6 +304,34 @@ Run tests:
 cargo test
 ```
 
+## Address System
+
+Grapheno uses a **Bitcoin-like address system** for privacy and efficiency:
+
+### How It Works
+
+1. **Receiving Funds:**
+   - Transaction outputs store Bitcoin addresses (Base58Check-encoded hashes of public keys)
+   - Your public key is NOT revealed until you spend
+   - Addresses are shorter and more user-friendly than full public keys
+
+2. **Spending Funds:**
+   - When creating a transaction, you include your full public key in the input
+   - The network verifies that `hash(public_key) == address` from the previous output
+   - Your signature proves ownership of the private key
+
+3. **Address Format:**
+   - Base58Check encoding (25-35 characters)
+   - Format: `version_byte + pubkey_hash + checksum`
+   - Example: `18VvDB8FnwU4symRpFSjbFoDJFyzQyHWVV`
+
+### Benefits
+
+- **Privacy:** Public keys only revealed when spending
+- **Efficiency:** Addresses are shorter than full public keys
+- **User-Friendly:** Easier to share and verify addresses
+- **Security:** Checksum validation prevents typos
+
 ## Notes
 
 - The blockchain database (default: `./blockchain_db`) persists the blockchain state between node restarts
@@ -245,3 +341,4 @@ cargo test
 - Multiple nodes can run simultaneously, each with its own database and port
 - Nodes automatically sync with peers and maintain consensus on the longest valid chain
 - The wallet TUI requires a terminal that supports ANSI escape codes
+- **Breaking Change:** This version uses address-based transactions. Old blockchain databases are incompatible and must be recreated

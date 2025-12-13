@@ -86,6 +86,47 @@ impl PublicKey {
         
         bs58::encode(&address_bytes).into_string()
     }
+
+    /// Validate a Bitcoin-style address format
+    /// Returns true if the address is valid Base58Check format
+    pub fn validate_address(address: &str) -> Result<bool, String> {
+        // Decode Base58
+        let decoded = bs58::decode(address)
+            .into_vec()
+            .map_err(|e| format!("Invalid Base58 encoding: {}", e))?;
+
+        // Address should be at least 25 bytes (version + hash + checksum)
+        if decoded.len() < 25 {
+            return Ok(false);
+        }
+
+        // Split into version+hash and checksum
+        let version_and_hash = &decoded[..decoded.len() - 4];
+        let provided_checksum = &decoded[decoded.len() - 4..];
+
+        // Calculate expected checksum (double SHA256)
+        let mut hasher = Sha256::new();
+        hasher.update(version_and_hash);
+        let first_hash = hasher.finalize();
+
+        let mut hasher2 = Sha256::new();
+        hasher2.update(&first_hash);
+        let second_hash = hasher2.finalize();
+
+        let expected_checksum = &second_hash[..4];
+
+        // Verify checksum matches
+        if provided_checksum != expected_checksum {
+            return Ok(false);
+        }
+
+        // Verify version byte is 0x00 (mainnet-style)
+        if decoded[0] != 0x00 {
+            return Ok(false);
+        }
+
+        Ok(true)
+    }
 }
 
 impl fmt::Display for PublicKey {

@@ -51,7 +51,8 @@ async fn main() -> Result<()> {
     let mut core = Core::load(cli.config.clone()).await?;
     if let Some(node) = cli.node {
         info!("Overriding default node with: {}", node);
-        core.config.default_node = node;
+        let mut config = core.config.write().unwrap();
+        config.default_node = node;
     }
 
     let (tx_sender, tx_receiver) = kanal::bounded(10);

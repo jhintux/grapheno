@@ -47,11 +47,11 @@ pub fn generate_dummy_config(path: &PathBuf) -> Result<()> {
         contacts: vec![
             Recipient {
                 name: "Alice".to_string(),
-                key: PathBuf::from("alice.pub.pem"),
+                address: "18VvDB8FnwU4symRpFSjbFoDJFyzQyHWVV".to_string(),
             },
             Recipient {
                 name: "Bob".to_string(),
-                key: PathBuf::from("bob.pub.pem"),
+                address: "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa".to_string(),
             },
         ],
         default_node: "127.0.0.1:9000".to_string(),

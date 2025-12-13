@@ -26,12 +26,14 @@ fn main() {
 
     let private_key = PrivateKey::load_from_file(&key_path)
         .expect("Failed to load private key from file");
+    let public_key = private_key.public_key();
+    let address = public_key.to_address();
     let transactions = vec![Transaction::new(
         vec![],
         vec![TransactionOutput {
             unique_id: Uuid::new_v4(),
             value: btclib::INITIAL_REWARD * 10u64.pow(8),
-            pubkey: private_key.public_key(),
+            address,
         }],
     )];
 

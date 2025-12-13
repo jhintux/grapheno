@@ -94,7 +94,8 @@ impl Miner {
 
     async fn fetch_template(&self) -> Result<()> {
         println!("Fetching new template");
-        let message = Message::FetchTemplate(self.public_key.clone());
+        let address = self.public_key.to_address();
+        let message = Message::FetchTemplate(address);
         let mut stream_lock = self.stream.lock().await;
         message.send_async(&mut *stream_lock).await?;
         drop(stream_lock);

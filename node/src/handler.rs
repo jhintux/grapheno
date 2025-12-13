@@ -78,13 +78,13 @@ pub async fn handle_connection(ctx: NodeContext, mut socket: TcpStream) {
                 let message = Difference(count);
                 message.send_async(&mut socket).await.unwrap();
             }
-            FetchUTXOs(key) => {
-                debug!("received request to fetch UTXOs");
+            FetchUTXOs(address) => {
+                debug!("received request to fetch UTXOs for address: {}", address);
                 let blockchain = ctx.blockchain.read().await;
                 let utxos = blockchain
                     .utxos()
                     .iter()
-                    .filter(|(_, (_, txout))| txout.pubkey == key)
+                    .filter(|(_, (_, txout))| txout.address == address)
                     .map(|(_, (marked, txout))| (txout.clone(), *marked))
                     .collect::<Vec<_>>();
                 let message = UTXOs(utxos);
@@ -140,7 +140,7 @@ pub async fn handle_connection(ctx: NodeContext, mut socket: TcpStream) {
                 broadcast_to_nodes(&ctx, || Message::NewTransaction(tx_clone.clone())).await;
                 println!("transaction sent to all nodes");
             }
-            FetchTemplate(pubkey) => {
+            FetchTemplate(address) => {
                 let blockchain = ctx.blockchain.read().await;
 
                 // Build transactions list: coinbase first, then mempool transactions
@@ -156,7 +156,7 @@ pub async fn handle_connection(ctx: NodeContext, mut socket: TcpStream) {
                 let coinbase = Transaction {
                     inputs: vec![],
                     outputs: vec![TransactionOutput {
-                        pubkey,
+                        address,
                         value: 0,
                         unique_id: Uuid::new_v4(),
                     }],

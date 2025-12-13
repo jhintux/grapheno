@@ -1,4 +1,3 @@
-use crate::crypto::PublicKey;
 use crate::types::{Block, Transaction, TransactionOutput};
 use serde::{Deserialize, Serialize};
 use std::io::{Error as IoError, Read, Write};
@@ -7,9 +6,9 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 // TODO implement gRPC for the network
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub enum Message {
-    /// Fetch all UTXOs belonging to a public key
-    FetchUTXOs(PublicKey),
-    /// UTXOs belonging to a public key. Bool determines if marked
+    /// Fetch all UTXOs belonging to an address
+    FetchUTXOs(String),
+    /// UTXOs belonging to an address. Bool determines if marked
     UTXOs(Vec<(TransactionOutput, bool)>),
     /// Send a transaction to the network
     SubmitTransaction(Transaction),
@@ -17,8 +16,8 @@ pub enum Message {
     NewTransaction(Transaction),
     /// Ask the node to prepare the optimal block template
     /// with the coinbase transaction paying the specified
-    /// public key
-    FetchTemplate(PublicKey),
+    /// address
+    FetchTemplate(String),
     /// The template
     Template(Block),
     /// Ask the node to validate a block template.
