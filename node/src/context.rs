@@ -8,7 +8,7 @@ use dashmap::DashMap;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::net::TcpStream;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tracing::info;
 
 /// Shared context for the node containing blockchain, database, and peer connections
@@ -16,7 +16,7 @@ use tracing::info;
 pub struct NodeContext {
     pub blockchain: Arc<RwLock<Blockchain>>,
     pub db: Arc<BlockchainDB>,
-    pub nodes: Arc<DashMap<String, TcpStream>>,
+    pub nodes: Arc<DashMap<String, Arc<Mutex<TcpStream>>>>,
 }
 
 impl NodeContext {
@@ -45,14 +45,13 @@ impl NodeContext {
             if nodes.is_empty() {
                 info!("no initial nodes provided, starting as a seed node");
             } else {
-                let (longest_name, longest_count) =
+                let (longest_name, _) =
                     find_longest_chain_node(&connections).await?;
 
                 download_blockchain(
                     &connections,
                     &blockchain,
-                    &longest_name,
-                    longest_count,
+                    &longest_name
                 )
                 .await?;
 

@@ -1,12 +1,44 @@
 use crate::context::NodeContext;
 use btclib::network::Message;
 use btclib::sha256::Hash;
-use btclib::types::{Block, BlockHeader, Transaction, TransactionOutput};
+use btclib::types::{Block, BlockHeader, Blockchain, Transaction, TransactionOutput};
 use btclib::util::MerkleRoot;
 use chrono::Utc;
 use tokio::net::TcpStream;
 use tracing::{info, debug, warn, error};
 use uuid::Uuid;
+
+fn get_last_block_hash(blockchain: &Blockchain) -> Hash {
+    blockchain
+        .blocks()
+        .last()
+        .map(|last_block| last_block.hash())
+        .unwrap_or(Hash::zero())
+}
+
+async fn broadcast_to_nodes<F>(ctx: &NodeContext, message_factory: F)
+where
+    F: Fn() -> Message,
+{
+    // Snapshot all node keys first (no .await, so safe to hold DashMap references)
+    let nodes: Vec<_> = ctx.nodes.iter().map(|x| x.key().clone()).collect();
+    
+    for node in nodes {
+        // Get a clone of the Arc<Mutex<TcpStream>> while holding DashMap lock briefly
+        // Then release the DashMap lock before doing any async I/O
+        let stream_mutex = match ctx.nodes.get(&node) {
+            Some(entry) => entry.value().clone(),
+            None => continue,
+        };
+        
+        // Now perform async I/O outside of any DashMap lock
+        let mut stream = stream_mutex.lock().await;
+        let message = message_factory();
+        if message.send_async(&mut *stream).await.is_err() {
+            error!("failed to send message to {node}")
+        }
+    }
+}
 
 pub async fn handle_connection(ctx: NodeContext, mut socket: TcpStream) {
     loop {
@@ -20,8 +52,9 @@ pub async fn handle_connection(ctx: NodeContext, mut socket: TcpStream) {
         };
         use btclib::network::Message::*;
         match message {
-            UTXOs(_) | Template(_) | Difference(_) | TemplateValidity(_) | NodeList(_) => {
-                warn!("I am neither a miner nor a wallet! Goodbye");
+            UTXOs(_) | Template(_) | Difference(_) | TemplateValidity(_) | NodeList(_)
+            | AllBlocks(_) => {
+                info!("I am neither a miner nor a wallet! Goodbye");
                 return;
             }
             FetchBlock(height) => {
@@ -33,8 +66,15 @@ pub async fn handle_connection(ctx: NodeContext, mut socket: TcpStream) {
                 let message = NewBlock(block);
                 message.send_async(&mut socket).await.unwrap();
             }
+            FetchAllBlocks => {
+                let blockchain = ctx.blockchain.read().await;
+                let blocks: Vec<Block> = blockchain.blocks().cloned().collect();
+                let message = AllBlocks(blocks);
+                message.send_async(&mut socket).await.unwrap();
+            }
             DiscoverNodes => {
-                let nodes = ctx.nodes
+                let nodes = ctx
+                    .nodes
                     .iter()
                     .map(|x| x.key().clone())
                     .collect::<Vec<_>>();
@@ -64,26 +104,19 @@ pub async fn handle_connection(ctx: NodeContext, mut socket: TcpStream) {
                 let mut blockchain = ctx.blockchain.write().await;
                 info!("received new block: {}", block.hash());
                 if blockchain.add_block(block.clone()).is_err() {
-                    warn!("block rejected: {}", block.hash());
-                    return;
+                    warn!("block rejected: {} (nodes may be out of sync)", block.hash());
                 }
             }
             NewTransaction(tx) => {
                 let mut blockchain = ctx.blockchain.write().await;
                 info!("received new transaction: {}", tx.hash());
                 if blockchain.add_to_mempool(tx.clone()).is_err() {
-                    warn!("transaction rejected: {}", tx.hash());
-                    return;
+                    warn!("transaction rejected: {} (nodes may be out of sync)", tx.hash());
                 }
             }
             ValidateTemplate(block_template) => {
                 let blockchain = ctx.blockchain.read().await;
-                let status = block_template.header.prev_block_hash
-                    == blockchain
-                        .blocks()
-                        .last()
-                        .map(|last_block| last_block.hash())
-                        .unwrap_or(Hash::zero());
+                let status = block_template.header.prev_block_hash == get_last_block_hash(&blockchain);
 
                 let message = TemplateValidity(status);
                 message.send_async(&mut socket).await.unwrap();
@@ -98,19 +131,7 @@ pub async fn handle_connection(ctx: NodeContext, mut socket: TcpStream) {
                 blockchain.rebuild_utxos();
                 info!("block looks good, broadcasting");
 
-                //send block to all nodes
-                let nodes = ctx.nodes
-                    .iter()
-                    .map(|x| x.key().clone())
-                    .collect::<Vec<_>>();
-                for node in nodes {
-                    if let Some(mut stream) = ctx.nodes.get_mut(&node) {
-                        let message = Message::NewBlock(block.clone());
-                        if message.send_async(&mut *stream).await.is_err() {
-                            warn!("failed to send block to {node}")
-                        };
-                    }
-                }
+                broadcast_to_nodes(&ctx, || Message::NewBlock(block.clone())).await;
             }
             SubmitTransaction(tx) => {
                 debug!("submit tx");
@@ -120,65 +141,46 @@ pub async fn handle_connection(ctx: NodeContext, mut socket: TcpStream) {
                     return;
                 }
                 info!("added transaction to mempool");
-                // send transaction to all nodes
-                let nodes = ctx.nodes
-                    .iter()
-                    .map(|x| x.key().clone())
-                    .collect::<Vec<_>>();
-                for node in nodes {
-                    if let Some(mut stream) = ctx.nodes.get_mut(&node) {
-                        let message = Message::NewTransaction(tx.clone());
-                        if message.send_async(&mut *stream).await.is_err() {
-                            warn!("failed to send transaction to {node}")
-                        };
-                    }
-                }
-                debug!("transaction sent to all nodes");
+                broadcast_to_nodes(&ctx, || Message::NewTransaction(tx.clone())).await;
+                info!("transaction sent to all nodes");
             }
             FetchTemplate(pubkey) => {
                 let blockchain = ctx.blockchain.read().await;
-                let mut transactions = vec![];
+                
+                // Build transactions list: coinbase first, then mempool transactions
+                let mut transactions: Vec<Transaction> = blockchain
+                    .mempool()
+                    .iter()
+                    .take(btclib::BLOCK_TRANSACTION_CAP)
+                    .map(|(_, tx)| tx)
+                    .cloned()
+                    .collect();
 
-                // insert txs from mempool
-                transactions.extend(
-                    blockchain
-                        .mempool()
-                        .iter()
-                        .take(btclib::BLOCK_TRANSACTION_CAP)
-                        .map(|(_, tx)| tx)
-                        .cloned()
-                        .collect::<Vec<_>>(),
-                );
+                // Insert coinbase transaction at the beginning
+                let coinbase = Transaction {
+                    inputs: vec![],
+                    outputs: vec![TransactionOutput {
+                        pubkey,
+                        value: 0,
+                        unique_id: Uuid::new_v4(),
+                    }],
+                };
+                transactions.insert(0, coinbase);
 
-                // insert coinbase tx with pubkey
-                transactions.insert(
-                    0,
-                    Transaction {
-                        inputs: vec![],
-                        outputs: vec![TransactionOutput {
-                            pubkey,
-                            value: 0,
-                            unique_id: Uuid::new_v4(),
-                        }],
-                    },
-                );
-
-                let merkle_root = MerkleRoot::calculate(&transactions);
+                // Create block with placeholder merkle root (will be calculated after coinbase value is set)
+                let prev_block_hash = get_last_block_hash(&blockchain);
                 let mut block = Block::new(
                     BlockHeader {
                         timestamp: Utc::now(),
                         nonce: 0,
-                        prev_block_hash: blockchain
-                            .blocks()
-                            .last()
-                            .map(|last_block| last_block.hash())
-                            .unwrap_or(Hash::zero()),
-                        merkle_root,
+                        prev_block_hash,
+                        merkle_root: MerkleRoot::calculate(&[]),
                         target: blockchain.target(),
                     },
                     transactions,
                 );
 
+                // Calculate miner fees and update coinbase value
                 let miner_fees = match block.calculate_miner_fees(blockchain.utxos()) {
                     Ok(fees) => fees,
                     Err(e) => {
@@ -187,10 +189,10 @@ pub async fn handle_connection(ctx: NodeContext, mut socket: TcpStream) {
                     }
                 };
 
-                // TODO check btclib to prevent calculating merkle tree twice
                 let reward = blockchain.calculate_block_reward();
                 block.transactions[0].outputs[0].value = reward + miner_fees;
 
+                // Calculate merkle root once after coinbase value is finalized
                 block.header.merkle_root = MerkleRoot::calculate(&block.transactions);
 
                 let message = Template(block);

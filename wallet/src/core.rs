@@ -125,7 +125,6 @@ impl Core {
         Ok(Core::new(config, utxos, stream))
     }
 
-    // TODO improve the connection by locking the connection in a Mutex in config
     /// Fetch UTXOs from the node for all loaded keys
     pub async fn fetch_utxos(&self) -> Result<()> {
         for key in &self.utxos.my_keys {

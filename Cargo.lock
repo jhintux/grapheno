@@ -1933,6 +1933,7 @@ name = "wallet"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bigdecimal",
  "btclib",
  "clap",
  "crossbeam-skiplist",

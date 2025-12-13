@@ -1,12 +1,14 @@
 use crate::core::Core;
 use anyhow::Result;
-use cursive::Cursive;
 use cursive::event::{Event, Key};
 use cursive::traits::*;
 use cursive::views::{
     Button, Dialog, EditView, LinearLayout, Panel, ResizedView, TextContent, TextView,
 };
+use cursive::Cursive;
+use bigdecimal::{BigDecimal, ToPrimitive};
 use std::sync::{Arc, Mutex};
+use std::str::FromStr;
 use tracing::*;
 
 #[derive(Clone, Copy)]
@@ -14,13 +16,13 @@ enum Unit {
     Btc,
     Sats,
 }
+
 /// Convert an amount between BTC and Satoshi units.
-// TODO use bignumber to better precision
-fn convert_amount(amount: f64, from: Unit, to: Unit) -> f64 {
+fn convert_amount(amount: &BigDecimal, from: Unit, to: Unit) -> BigDecimal {
     match (from, to) {
-        (Unit::Btc, Unit::Sats) => amount * 100_000_000.0,
-        (Unit::Sats, Unit::Btc) => amount / 100_000_000.0,
-        _ => amount,
+        (Unit::Btc, Unit::Sats) => amount * BigDecimal::from(100_000_000u64),
+        (Unit::Sats, Unit::Btc) => amount / BigDecimal::from(100_000_000u64),
+        _ => amount.clone(),
     }
 }
 
@@ -158,12 +160,13 @@ fn send_transaction(s: &mut Cursive, core: Arc<Core>, unit: Unit) {
     let recipient = s
         .call_on_name("recipient", |view: &mut EditView| view.get_content())
         .unwrap();
-    let amount: f64 = s
+    let amount = s
         .call_on_name("amount", |view: &mut EditView| view.get_content())
-        .unwrap()
-        .parse()
-        .unwrap_or(0.0);
-    let amount_sats = convert_amount(amount, unit, Unit::Sats) as u64;
+        .unwrap();
+    let amount_decimal = BigDecimal::from_str(amount.as_ref()).unwrap_or_else(|_| BigDecimal::from(0u32));
+    let amount_sats = convert_amount(&amount_decimal, unit, Unit::Sats)
+        .to_u64()
+        .unwrap_or(0);
     info!(
         "Attempting to send transaction to {} for {} satoshis",
         recipient, amount_sats
