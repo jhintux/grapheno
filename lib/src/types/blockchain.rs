@@ -179,7 +179,7 @@ impl Blockchain {
         }
 
         // Calculate the fee of the new transaction
-        let new_inputs_value = transaction
+        let new_inputs_value: u64 = transaction
             .inputs
             .iter()
             .map(|input| {
@@ -189,7 +189,7 @@ impl Blockchain {
                     .1
                     .value
             })
-            .sum::<u64>();
+            .sum();
         let new_outputs_value: u64 = transaction.outputs.iter().map(|output| output.value).sum();
         let new_transaction_fee = new_inputs_value
             .checked_sub(new_outputs_value)

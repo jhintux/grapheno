@@ -20,13 +20,22 @@ async fn broadcast_to_nodes<F>(ctx: &NodeContext, message_factory: F)
 where
     F: Fn() -> Message,
 {
+    // Snapshot all node keys first (no .await, so safe to hold DashMap references)
     let nodes: Vec<_> = ctx.nodes.iter().map(|x| x.key().clone()).collect();
+    
     for node in nodes {
-        if let Some(mut stream) = ctx.nodes.get_mut(&node) {
-            let message = message_factory();
-            if message.send_async(&mut *stream).await.is_err() {
-                println!("failed to send message to {node}")
-            }
+        // Get a clone of the Arc<Mutex<TcpStream>> while holding DashMap lock briefly
+        // Then release the DashMap lock before doing any async I/O
+        let stream_mutex = match ctx.nodes.get(&node) {
+            Some(entry) => entry.value().clone(),
+            None => continue,
+        };
+        
+        // Now perform async I/O outside of any DashMap lock
+        let mut stream = stream_mutex.lock().await;
+        let message = message_factory();
+        if message.send_async(&mut *stream).await.is_err() {
+            error!("failed to send message to {node}")
         }
     }
 }
@@ -45,7 +54,7 @@ pub async fn handle_connection(ctx: NodeContext, mut socket: TcpStream) {
         match message {
             UTXOs(_) | Template(_) | Difference(_) | TemplateValidity(_) | NodeList(_)
             | AllBlocks(_) => {
-                println!("I am neither a miner nor a wallet! Goodbye");
+                info!("I am neither a miner nor a wallet! Goodbye");
                 return;
             }
             FetchBlock(height) => {
@@ -95,16 +104,14 @@ pub async fn handle_connection(ctx: NodeContext, mut socket: TcpStream) {
                 let mut blockchain = ctx.blockchain.write().await;
                 info!("received new block: {}", block.hash());
                 if blockchain.add_block(block.clone()).is_err() {
-                    warn!("block rejected: {}", block.hash());
-                    return;
+                    warn!("block rejected: {} (nodes may be out of sync)", block.hash());
                 }
             }
             NewTransaction(tx) => {
                 let mut blockchain = ctx.blockchain.write().await;
                 info!("received new transaction: {}", tx.hash());
                 if blockchain.add_to_mempool(tx.clone()).is_err() {
-                    warn!("transaction rejected: {}", tx.hash());
-                    return;
+                    warn!("transaction rejected: {} (nodes may be out of sync)", tx.hash());
                 }
             }
             ValidateTemplate(block_template) => {
@@ -124,8 +131,7 @@ pub async fn handle_connection(ctx: NodeContext, mut socket: TcpStream) {
                 blockchain.rebuild_utxos();
                 info!("block looks good, broadcasting");
 
-                let block_clone = block.clone();
-                broadcast_to_nodes(&ctx, || Message::NewBlock(block_clone.clone())).await;
+                broadcast_to_nodes(&ctx, || Message::NewBlock(block.clone())).await;
             }
             SubmitTransaction(tx) => {
                 debug!("submit tx");
@@ -134,10 +140,9 @@ pub async fn handle_connection(ctx: NodeContext, mut socket: TcpStream) {
                     warn!("transaction rejected: {e}, closing connection");
                     return;
                 }
-                println!("added transaction to mempool");
-                let tx_clone = tx.clone();
-                broadcast_to_nodes(&ctx, || Message::NewTransaction(tx_clone.clone())).await;
-                println!("transaction sent to all nodes");
+                info!("added transaction to mempool");
+                broadcast_to_nodes(&ctx, || Message::NewTransaction(tx.clone())).await;
+                info!("transaction sent to all nodes");
             }
             FetchTemplate(pubkey) => {
                 let blockchain = ctx.blockchain.read().await;

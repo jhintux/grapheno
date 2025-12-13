@@ -1,19 +1,19 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{anyhow,Result};
 use btclib::network::Message;
 use btclib::types::Blockchain;
 use dashmap::DashMap;
 use tokio::net::TcpStream;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tokio::time;
 use tracing::{debug, error, info, warn};
 
 use crate::context::NodeContext;
 use crate::database::BlockchainDB;
 
-pub async fn populate_connections(nodes: &[String]) -> Result<Arc<DashMap<String, TcpStream>>> {
+pub async fn populate_connections(nodes: &[String]) -> Result<Arc<DashMap<String, Arc<Mutex<TcpStream>>>>> {
     let node_connections = Arc::new(DashMap::new());
     debug!("trying to connect to other nodes...");
     for node in nodes {
@@ -29,14 +29,14 @@ pub async fn populate_connections(nodes: &[String]) -> Result<Arc<DashMap<String
                 for child_node in child_nodes {
                     debug!("adding node {}", child_node);
                     let new_stream = TcpStream::connect(&child_node).await?;
-                    node_connections.insert(child_node, new_stream);
+                    node_connections.insert(child_node, Arc::new(Mutex::new(new_stream)));
                 }
             }
             _ => {
                 warn!("unexpected message from {}", node);
             }
         }
-        node_connections.insert(node.clone(), stream);
+        node_connections.insert(node.clone(), Arc::new(Mutex::new(stream)));
     }
     Ok(node_connections)
 }
@@ -47,7 +47,7 @@ fn calculate_consensus_chain_length(
     responses: Vec<(String, i32)>,
 ) -> Result<(u32, Vec<String>)> {
     if responses.is_empty() {
-        return Err(anyhow::anyhow!("no node responses received"));
+        return Err(anyhow!("no node responses received"));
     }
 
     let total_nodes = responses.len();
@@ -63,29 +63,31 @@ fn calculate_consensus_chain_length(
     }
 
     // Find chain length with majority consensus
-    let mut consensus_length: Option<i32> = None;
-    let mut consensus_nodes: Vec<String> = Vec::new();
+    //let mut consensus_length: Option<i32> = None;
+    //let mut consensus_nodes: Vec<String> = Vec::new();
+    let mut consensus: Option<(i32, &Vec<String>)> = None;
     let mut max_group_size = 0;
 
     for (length, nodes) in &length_groups {
         let group_size = nodes.len();
         if group_size >= majority_threshold {
             // Found majority consensus
-            consensus_length = Some(*length);
-            consensus_nodes = nodes.clone();
+            consensus = Some((*length, nodes));
+            //consensus_length = Some(*length);
+            //consensus_nodes = nodes.clone();
             break;
         }
         // Track the most common length as fallback
         if group_size > max_group_size {
             max_group_size = group_size;
-            consensus_length = Some(*length);
-            consensus_nodes = nodes.clone();
+            //consensus_length = Some(*length);
+            //consensus_nodes = nodes.clone();
         }
     }
 
     // If no majority, use the most common length (already set above)
-    let consensus_len = consensus_length.ok_or_else(|| {
-        anyhow::anyhow!("failed to determine consensus chain length")
+    let (consensus_len, consensus_nodes) = consensus.ok_or_else(|| {
+        anyhow!("failed to determine consensus chain length")
     })?;
 
     let consensus_count = consensus_nodes.len();
@@ -118,78 +120,88 @@ fn calculate_consensus_chain_length(
 
     // Ensure non-negative length
     if consensus_len < 0 {
-        return Err(anyhow::anyhow!(
+        return Err(anyhow!(
             "consensus chain length is negative: {}",
             consensus_len
         ));
     }
 
-    Ok((consensus_len as u32, consensus_nodes))
+    Ok((consensus_len as u32, consensus_nodes.clone()))
+}
+
+/// Perform AskDifference request/response with a single node
+/// Locks the Mutex, performs I/O, and releases the lock before returning
+async fn ask_node_difference(
+    stream_mutex: Arc<Mutex<TcpStream>>,
+) -> Result<i32> {
+    let mut stream = stream_mutex.lock().await;
+    
+    // Send AskDifference message
+    let message = Message::AskDifference(0);
+    message.send_async(&mut *stream).await?;
+    
+    debug!("sent AskDifference");
+    
+    // Receive response
+    let response = Message::receive_async(&mut *stream).await?;
+    
+    match response {
+        Message::Difference(count) => {
+            debug!("received Difference: {}", count);
+            Ok(count)
+        }
+        other => {
+            Err(anyhow!("unexpected message type: {:?}", other))
+        }
+    }
 }
 
 /// Find the node with the longest valid chain using consensus mechanism
 /// Implements Bitcoin-like consensus: requires majority (50%+1) of nodes to agree on chain length
 pub async fn find_longest_chain_node(
-    nodes_connections: &Arc<DashMap<String, TcpStream>>,
+    nodes_connections: &Arc<DashMap<String, Arc<Mutex<TcpStream>>>>,
 ) -> Result<(String, u32)> {
     debug!("finding nodes with the highest blockchain length using consensus...");
     
-    let all_nodes = nodes_connections
-        .iter()
-        .map(|x| x.key().clone())
-        .collect::<Vec<_>>();
-
-    if all_nodes.is_empty() {
+    if nodes_connections.is_empty() {
         return Err(anyhow::anyhow!("no nodes connected"));
     }
+
+    // Snapshot all node keys first (no .await, so safe to hold DashMap references)
+    // This ensures we don't hold any DashMap locks across async boundaries
+    let node_keys: Vec<String> = nodes_connections
+        .iter()
+        .map(|entry| entry.key().clone())
+        .collect();
 
     // Collect all node responses
     let mut responses: Vec<(String, i32)> = Vec::new();
     let mut failed_nodes: Vec<String> = Vec::new();
 
-    for node in &all_nodes {
-        debug!("asking {} for blockchain length", node);
+    // Process each node sequentially
+    for node_key in &node_keys {
+        debug!("asking {} for blockchain length", node_key);
         
-        let result = {
-            let mut stream = match nodes_connections.get_mut(node) {
-                Some(stream) => stream,
-                None => {
-                    warn!("node {} no longer in connections map", node);
-                    failed_nodes.push(node.clone());
-                    continue;
-                }
-            };
-
-            // Send AskDifference message
-            let send_result = {
-                let message = Message::AskDifference(0);
-                message.send_async(&mut *stream).await
-            };
-
-            if let Err(e) = send_result {
-                warn!("failed to send AskDifference to {}: {}", node, e);
-                failed_nodes.push(node.clone());
+        // Get a clone of the Arc<Mutex<TcpStream>> while holding DashMap lock briefly
+        // Then release the DashMap lock before doing any async I/O
+        let stream_mutex = match nodes_connections.get(node_key) {
+            Some(entry) => entry.value().clone(),
+            None => {
+                warn!("node {} no longer in connections map", node_key);
+                failed_nodes.push(node_key.clone());
                 continue;
             }
-
-            debug!("sent AskDifference to {}", node);
-
-            // Receive response
-            Message::receive_async(&mut *stream).await
         };
-
-        match result {
-            Ok(Message::Difference(count)) => {
-                debug!("received Difference from {}: {}", node, count);
-                responses.push((node.clone(), count));
-            }
-            Ok(e) => {
-                warn!("unexpected message from {}: {:?}", node, e);
-                failed_nodes.push(node.clone());
+        
+        // Now perform async I/O outside of any DashMap lock
+        match ask_node_difference(stream_mutex).await {
+            Ok(count) => {
+                debug!("received Difference from {}: {}", node_key, count);
+                responses.push((node_key.clone(), count));
             }
             Err(e) => {
-                warn!("failed to receive response from {}: {}", node, e);
-                failed_nodes.push(node.clone());
+                warn!("failed to get response from {}: {}", node_key, e);
+                failed_nodes.push(node_key.clone());
             }
         }
     }
@@ -206,18 +218,14 @@ pub async fn find_longest_chain_node(
     // Calculate consensus
     let (consensus_length, consensus_nodes) = calculate_consensus_chain_length(responses)?;
 
-    if consensus_nodes.is_empty() {
-        return Err(anyhow::anyhow!("no nodes in consensus group"));
-    }
-
     // Select a node from the consensus group (prefer first one, or could randomize)
     let selected_node = consensus_nodes[0].clone();
 
-    if consensus_nodes.len() == 1 && all_nodes.len() > 1 {
+    if consensus_nodes.len() == 1 && nodes_connections.len() > 1 {
         warn!(
             "only one node agrees on chain length {} (out of {} total nodes). proceeding with caution.",
             consensus_length,
-            all_nodes.len()
+            nodes_connections.len()
         );
     }
 
@@ -232,11 +240,20 @@ pub async fn find_longest_chain_node(
 }
 
 pub async fn download_blockchain(
-    nodes_connections: &Arc<DashMap<String, TcpStream>>,
+    nodes_connections: &Arc<DashMap<String, Arc<Mutex<TcpStream>>>>,
     blockchain: &Arc<RwLock<Blockchain>>,
     node: &str,
 ) -> Result<()> {
-    let mut stream = nodes_connections.get_mut(node).unwrap();
+    // Get a clone of the Arc<Mutex<TcpStream>> while holding DashMap lock briefly
+    // Then release the DashMap lock before doing any async I/O
+    let stream_mutex = nodes_connections
+        .get(node)
+        .ok_or_else(|| anyhow!("node {} not found in connections", node))?
+        .value()
+        .clone();
+    
+    // Now perform async I/O outside of any DashMap lock
+    let mut stream = stream_mutex.lock().await;
     let message = Message::FetchAllBlocks;
     message.send_async(&mut *stream).await?;
     let message = Message::receive_async(&mut *stream).await?;
