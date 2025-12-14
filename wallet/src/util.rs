@@ -4,24 +4,47 @@ use std::panic;
 use std::path::PathBuf;
 use tracing::*;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
+use tracing_appender::{rolling, non_blocking};
+use std::fs;
 
 /// Initialize tracing with compact format and environment-based filtering
+/// Logs are written to wallet/logs/wallet.log.YYYY-MM-DD
 pub fn init_tracing() -> Result<()> {
-    // Create a formatting layer for tracing output with a compact format
-    let fmt_layer = fmt::layer().compact();
-
+    // Create logs directory if it doesn't exist
+    let logs_dir = PathBuf::from("wallet/logs");
+    fs::create_dir_all(&logs_dir)?;
+    
+    // Create a rolling file appender that creates a new file daily
+    // Format: wallet.log.YYYY-MM-DD
+    let file_appender = rolling::daily(logs_dir, "wallet.log");
+    let (non_blocking, _guard) = non_blocking(file_appender);
+    
+    // Store the guard in a static to keep it alive
+    // This ensures logs are flushed properly
+    static GUARD: std::sync::OnceLock<non_blocking::WorkerGuard> = std::sync::OnceLock::new();
+    GUARD.set(_guard).map_err(|_| anyhow::anyhow!("Failed to set log guard"))?;
+    
+    // Create a formatting layer for file output with full details
+    let file_layer = fmt::layer()
+        .with_writer(non_blocking)
+        .with_ansi(false) // No ANSI colors in file
+        .with_target(true)
+        .with_line_number(true)
+        .with_file(true);
+    
     // Create a filter layer to control the verbosity of logs
     // Try to get the filter configuration from the environment variables
     // If it fails, default to the "info" log level
     let filter_layer = EnvFilter::try_from_default_env().or_else(|_| EnvFilter::try_new("info"))?;
 
-    // Build the tracing subscriber registry with the formatting layer,
-    // the filter layer, and the error layer for enhanced error reporting
+    // Build the tracing subscriber registry with the file layer and filter
     tracing_subscriber::registry()
         .with(filter_layer) // Add the filter layer to control log verbosity
-        .with(fmt_layer) // Add the formatting layer for compact log output
+        .with(file_layer) // Add the file layer for log output
         .init(); // Initialize the tracing subscriber
 
+    info!("Logging to wallet/logs/wallet.log.YYYY-MM-DD");
+    
     Ok(())
 }
 

@@ -1,4 +1,4 @@
-use crate::core::Core;
+use crate::core::{Core, TransactionResult};
 use crate::ui::run_ui;
 use crate::util::big_mode_btc;
 use btclib::types::Transaction;
@@ -6,6 +6,7 @@ use cursive::views::TextContent;
 use std::sync::Arc;
 use tokio::task::JoinHandle;
 use tokio::time::{self, Duration};
+use tokio::sync::oneshot;
 use tracing::*;
 
 pub fn update_utxos(core: Arc<Core>) -> JoinHandle<()> {
@@ -21,13 +22,38 @@ pub fn update_utxos(core: Arc<Core>) -> JoinHandle<()> {
 }
 
 pub fn handle_transactions(
-    rx: kanal::AsyncReceiver<Transaction>,
+    rx: kanal::AsyncReceiver<(Transaction, Option<oneshot::Sender<TransactionResult>>)>,
     core: Arc<Core>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        while let Ok(transaction) = rx.recv().await {
-            if let Err(e) = core.send_transaction(transaction).await {
-                error!("Failed to send transaction: {}", e);
+        while let Ok((transaction, result_tx)) = rx.recv().await {
+            info!("Handling transaction: {}", transaction.hash());
+            match core.send_transaction(transaction).await {
+                Ok(result) => {
+                    // Send result back to the caller if they provided a channel
+                    if let Some(tx) = result_tx {
+                        let _ = tx.send(result.clone());
+                    }
+                    
+                    match result {
+                        TransactionResult::Success => {
+                            info!("Transaction successfully sent and accepted");
+                        }
+                        TransactionResult::Rejected(reason) => {
+                            error!("Transaction rejected: {}", reason);
+                        }
+                        TransactionResult::Error(e) => {
+                            error!("Transaction error: {}", e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!("Failed to send transaction: {}", e);
+                    // Send error result back if channel provided
+                    if let Some(tx) = result_tx {
+                        let _ = tx.send(TransactionResult::Error(format!("{}", e)));
+                    }
+                }
             }
         }
     })

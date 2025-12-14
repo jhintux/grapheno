@@ -1,19 +1,12 @@
-# Wallet Configuration
-# Keys are stored in the "keys" folder by default
-my_keys = [
-    { public = "keys/node.pub.pem", private = "keys/node.priv.cbor" }
-]
 default_node = "127.0.0.1:9000"
 
-# Contacts use Bitcoin addresses (Base58Check encoded)
-# No public key files needed - just name and address
-[[contacts]]
-name = "Alice"
-address = "18VvDB8FnwU4symRpFSjbFoDJFyzQyHWVV"
+[[my_keys]]
+public = "keys/alice.pub.pem"
+private = "keys/alice.priv.cbor"
 
 [[contacts]]
 name = "Bob"
-address = "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"
+address = "18VvDB8FnwU4symRpFSjbFoDJFyzQyHWVV"
 
 [fee_config]
 fee_type = "Percent"
