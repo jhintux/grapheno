@@ -1,6 +1,6 @@
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use btclib::crypto::{PrivateKey, PublicKey, Signature};
-use btclib::network::Message;
+use btclib::network::{Envelope, Message};
 use btclib::types::{Transaction, TransactionInput, TransactionOutput};
 use btclib::util::Saveable;
 use crossbeam_skiplist::SkipMap;
@@ -13,6 +13,8 @@ use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tracing::*;
 use uuid::Uuid;
+
+const DEFAULT_TTL: u8 = 8;
 
 /// Represent a key pair with paths to public and private keys
 #[derive(Serialize, Deserialize, Clone)]
@@ -98,6 +100,7 @@ pub struct Core {
     utxos: UtxoStore,
     pub tx_sender: Sender<Transaction>,
     pub stream: Mutex<TcpStream>,
+    wallet_id: String,
 }
 
 impl Core {
@@ -108,33 +111,48 @@ impl Core {
             utxos,
             tx_sender,
             stream: Mutex::new(stream),
+            wallet_id: Uuid::new_v4().to_string(),
         }
     }
 
     /// Load the core from a config file
+    #[tracing::instrument(skip(config_path))]
     pub async fn load(config_path: PathBuf) -> Result<Self> {
-        let config: Config = toml::from_str(&fs::read_to_string(&config_path)?)?;
+        let config_str =
+            fs::read_to_string(&config_path).context(anyhow!("Failed to read config file"))?;
+        let config: Config =
+            toml::from_str(&config_str).context(anyhow!("Failed to parse config file"))?;
+
         let mut utxos = UtxoStore::new();
-        let stream = TcpStream::connect(&config.default_node).await?;
+        let stream = TcpStream::connect(&config.default_node)
+            .await
+            .context(format!("Failed to connect to node: {}", config.default_node))?;
 
         for key in &config.my_keys {
-            let public = PublicKey::load_from_file(&key.public)?;
-            let private = PrivateKey::load_from_file(&key.private)?;
+            let public = PublicKey::load_from_file(&key.public)
+                .context(anyhow!("Failed to load public key"))?;
+            let private = PrivateKey::load_from_file(&key.private)
+                .context(anyhow!("Failed to load private key"))?;
             utxos.add_key(LoadedKey { public, private });
         }
         Ok(Core::new(config, utxos, stream))
     }
 
-    // TODO improve the connection by locking the connection in a Mutex in config
     /// Fetch UTXOs from the node for all loaded keys
     pub async fn fetch_utxos(&self) -> Result<()> {
         for key in &self.utxos.my_keys {
             let message = Message::FetchUTXOs(key.public.clone());
-            message.send_async(&mut *self.stream.lock().await).await?;
+            let envelope = Envelope::new(self.wallet_id.clone(), DEFAULT_TTL, message);
+            envelope
+                .send_async(&mut *self.stream.lock().await)
+                .await
+                .context("Failed to send FetchUTXOs message")?;
 
-            if let Message::UTXOs(utxos) =
-                Message::receive_async(&mut *self.stream.lock().await).await?
-            {
+            let response_envelope = Envelope::receive_async(&mut *self.stream.lock().await)
+                .await
+                .context("Failed to receive UTXOs response")?;
+
+            if let Message::UTXOs(utxos) = response_envelope.msg {
                 self.utxos.utxos.insert(
                     key.public.clone(),
                     utxos
@@ -152,7 +170,11 @@ impl Core {
     /// Send a transaction to the node
     pub async fn send_transaction(&self, transaction: Transaction) -> Result<()> {
         let message = Message::SubmitTransaction(transaction.clone());
-        message.send_async(&mut *self.stream.lock().await).await?;
+        let envelope = Envelope::new(self.wallet_id.clone(), DEFAULT_TTL, message);
+        envelope
+            .send_async(&mut *self.stream.lock().await)
+            .await
+            .context("Failed to send transaction to node")?;
         Ok(())
     }
 
@@ -170,7 +192,8 @@ impl Core {
 
         let transaction = self.create_transaction(&recipient_key, amount)?;
         debug!("Sending transaction asynchronously");
-        self.tx_sender.send(transaction)
+        self.tx_sender
+            .send(transaction)
             .map_err(|e| anyhow!("Failed to send transaction to channel: {}", e))?;
         Ok(())
     }
