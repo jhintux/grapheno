@@ -1,12 +1,19 @@
 use crate::context::NodeContext;
-use btclib::network::Message;
+use crate::network::{PeerHandle, PeerId};
+use anyhow::Result;
+use btclib::network::{Envelope, Message};
 use btclib::sha256::Hash;
 use btclib::types::{Block, BlockHeader, Blockchain, Transaction, TransactionOutput};
 use btclib::util::MerkleRoot;
 use chrono::Utc;
 use tokio::net::TcpStream;
-use tracing::{info, debug, warn, error};
+use tokio::sync::mpsc;
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
+use std::net::SocketAddr;
+
+const DEFAULT_TTL: u8 = 8;
+const OUTBOUND_BUFFER: usize = 256;
 
 fn get_last_block_hash(blockchain: &Blockchain) -> Hash {
     blockchain
@@ -16,137 +23,195 @@ fn get_last_block_hash(blockchain: &Blockchain) -> Hash {
         .unwrap_or(Hash::zero())
 }
 
-async fn broadcast_to_nodes<F>(ctx: &NodeContext, message_factory: F)
-where
-    F: Fn() -> Message,
-{
-    // Snapshot all node keys first (no .await, so safe to hold DashMap references)
-    let nodes: Vec<_> = ctx.nodes.iter().map(|x| x.key().clone()).collect();
-    
-    for node in nodes {
-        // Get a clone of the Arc<Mutex<TcpStream>> while holding DashMap lock briefly
-        // Then release the DashMap lock before doing any async I/O
-        let stream_mutex = match ctx.nodes.get(&node) {
-            Some(entry) => entry.value().clone(),
-            None => continue,
-        };
-        
-        // Now perform async I/O outside of any DashMap lock
-        let mut stream = stream_mutex.lock().await;
-        let message = message_factory();
-        if message.send_async(&mut *stream).await.is_err() {
-            error!("failed to send message to {node}")
+pub async fn accept_peer(
+    ctx: NodeContext,
+    socket: TcpStream,
+    peer_addr: SocketAddr,
+) -> Result<()> {
+    let peer_id = peer_addr.to_string();
+    let (mut rd, mut wr) = socket.into_split();
+
+    let (out_tx, mut out_rx) = mpsc::channel::<Envelope>(OUTBOUND_BUFFER);
+    ctx.network
+        .peers
+        .insert(peer_id.clone(), PeerHandle { outbound: out_tx });
+
+    let writer = tokio::spawn(async move {
+        while let Some(env) = out_rx.recv().await {
+            if env.send_async(&mut wr).await.is_err() {
+                break;
+            }
         }
-    }
+    });
+
+    let network = ctx.network.clone();
+    let reader = tokio::spawn(async move {
+        loop {
+            match Envelope::receive_async(&mut rd).await {
+                Ok(env) => {
+                    // // if inbound is full, this will await: backpressure by design
+                    if network.inbound_tx.send((peer_id.clone(), env)).await.is_err() {
+                        break;
+                    }
+                },
+                Err(_) => break,
+            }
+        }
+    });
+
+    // detach; cleanup could be improved later
+    let _ = (writer, reader);
+    Ok(())
 }
 
-pub async fn handle_connection(ctx: NodeContext, mut socket: TcpStream) {
+pub async fn dispatcher_loop(ctx: NodeContext) -> Result<()> {
     loop {
-        // read a message from the socket
-        let message = match Message::receive_async(&mut socket).await {
-            Ok(message) => message,
-            Err(e) => {
-                warn!("invalid message from peer: {e}, closing that connection");
-                return;
-            }
+        let (from_peer, mut env) = match ctx.network.next_inbound().await {
+            Some(x) => x,
+            None => return Ok(()),
         };
-        use btclib::network::Message::*;
-        match message {
-            UTXOs(_) | Template(_) | Difference(_) | TemplateValidity(_) | NodeList(_)
-            | AllBlocks(_) => {
-                info!("I am neither a miner nor a wallet! Goodbye");
-                return;
-            }
-            FetchBlock(height) => {
-                let blockchain = ctx.blockchain.read().await;
-                let Some(block) = blockchain.blocks().nth(height as usize).cloned() else {
-                    return;
-                };
 
-                let message = NewBlock(block);
-                message.send_async(&mut socket).await.unwrap();
+        if env.origin == ctx.network.self_id {
+            continue;
+        }
+
+        if !ctx.network.track_if_new(env.id).await {
+            continue;
+        }
+
+        let mut should_gossip = false;
+
+        match &env.msg {
+            Message::UTXOs(_)
+            | Message::Template(_)
+            | Message::Difference(_)
+            | Message::TemplateValidity(_)
+            | Message::NodeList(_)
+            | Message::AllBlocks(_) => {
+                info!("unexpected inbound response for node role, ignoring");
             }
-            FetchAllBlocks => {
+            Message::FetchBlock(height) => {
+                let blockchain = ctx.blockchain.read().await;
+                if let Some(block) = blockchain.blocks().nth(*height as usize).cloned() {
+                    let reply = Envelope::new(
+                        ctx.network.self_id.clone(),
+                        DEFAULT_TTL,
+                        Message::NewBlock(block),
+                    );
+                    ctx.network.send_to(&from_peer, reply).await;
+                }
+            }
+            Message::FetchAllBlocks => {
                 let blockchain = ctx.blockchain.read().await;
                 let blocks: Vec<Block> = blockchain.blocks().cloned().collect();
-                let message = AllBlocks(blocks);
-                message.send_async(&mut socket).await.unwrap();
+                let reply = Envelope::new(
+                    ctx.network.self_id.clone(),
+                    DEFAULT_TTL,
+                    Message::AllBlocks(blocks),
+                );
+                ctx.network.send_to(&from_peer, reply).await;
             }
-            DiscoverNodes => {
-                let nodes = ctx
-                    .nodes
-                    .iter()
-                    .map(|x| x.key().clone())
-                    .collect::<Vec<_>>();
-                let message = NodeList(nodes);
-                message.send_async(&mut socket).await.unwrap();
+            Message::DiscoverNodes => {
+                let nodes = ctx.network.peer_ids();
+                let reply = Envelope::new(
+                    ctx.network.self_id.clone(),
+                    DEFAULT_TTL,
+                    Message::NodeList(nodes),
+                );
+                ctx.network.send_to(&from_peer, reply).await;
             }
-            AskDifference(height) => {
+            Message::AskDifference(height) => {
                 let blockchain = ctx.blockchain.read().await;
-                let count = blockchain.block_height() as i32 - height as i32;
-                let message = Difference(count);
-                message.send_async(&mut socket).await.unwrap();
+                let count = blockchain.block_height() as i32 - *height as i32;
+                let reply = Envelope::new(
+                    ctx.network.self_id.clone(),
+                    DEFAULT_TTL,
+                    Message::Difference(count),
+                );
+                ctx.network.send_to(&from_peer, reply).await;
             }
-            FetchUTXOs(key) => {
+            Message::FetchUTXOs(key) => {
                 debug!("received request to fetch UTXOs");
                 let blockchain = ctx.blockchain.read().await;
                 let utxos = blockchain
                     .utxos()
                     .iter()
-                    .filter(|(_, (_, txout))| txout.pubkey == key)
+                    .filter(|(_, (_, txout))| txout.pubkey == *key)
                     .map(|(_, (marked, txout))| (txout.clone(), *marked))
                     .collect::<Vec<_>>();
-                let message = UTXOs(utxos);
-                message.send_async(&mut socket).await.unwrap();
+                let reply = Envelope::new(
+                    ctx.network.self_id.clone(),
+                    DEFAULT_TTL,
+                    Message::UTXOs(utxos),
+                );
+                ctx.network.send_to(&from_peer, reply).await;
             }
-            // TODO send back new blocks and txs to other nodes preventing the network from creating notifications loops
-            NewBlock(block) => {
+            Message::NewBlock(block) => {
+                let hash = block.hash();
                 let mut blockchain = ctx.blockchain.write().await;
-                info!("received new block: {}", block.hash());
+                info!("received new block: {}", hash);
                 if blockchain.add_block(block.clone()).is_err() {
-                    warn!("block rejected: {} (nodes may be out of sync)", block.hash());
+                    warn!("block rejected: {} (nodes may be out of sync)", hash);
+                } else {
+                    should_gossip = true;
                 }
             }
-            NewTransaction(tx) => {
+            Message::NewTransaction(tx) => {
+                let hash = tx.hash();
                 let mut blockchain = ctx.blockchain.write().await;
-                info!("received new transaction: {}", tx.hash());
+                info!("received new transaction: {}", hash);
                 if blockchain.add_to_mempool(tx.clone()).is_err() {
-                    warn!("transaction rejected: {} (nodes may be out of sync)", tx.hash());
+                    warn!("transaction rejected: {} (nodes may be out of sync)", hash);
+                } else {
+                    should_gossip = true;
                 }
             }
-            ValidateTemplate(block_template) => {
+            Message::ValidateTemplate(block_template) => {
                 let blockchain = ctx.blockchain.read().await;
-                let status = block_template.header.prev_block_hash == get_last_block_hash(&blockchain);
-
-                let message = TemplateValidity(status);
-                message.send_async(&mut socket).await.unwrap();
+                let status =
+                    block_template.header.prev_block_hash == get_last_block_hash(&blockchain);
+                let reply = Envelope::new(
+                    ctx.network.self_id.clone(),
+                    DEFAULT_TTL,
+                    Message::TemplateValidity(status),
+                );
+                ctx.network.send_to(&from_peer, reply).await;
             }
-            SubmitTemplate(block) => {
+            Message::SubmitTemplate(block) => {
                 info!("received allegedly mined template");
                 let mut blockchain = ctx.blockchain.write().await;
                 if let Err(e) = blockchain.add_block(block.clone()) {
                     warn!("block rejected: {e}, closing connection");
-                    return;
+                    continue;
                 }
                 blockchain.rebuild_utxos();
                 info!("block looks good, broadcasting");
-
-                broadcast_to_nodes(&ctx, || Message::NewBlock(block.clone())).await;
+                let gossip = Envelope::new(
+                    ctx.network.self_id.clone(),
+                    DEFAULT_TTL,
+                    Message::NewBlock(block.clone()),
+                );
+                broadcast_except(&ctx, Some(&from_peer), gossip).await;
             }
-            SubmitTransaction(tx) => {
+            Message::SubmitTransaction(tx) => {
                 debug!("submit tx");
                 let mut blockchain = ctx.blockchain.write().await;
                 if let Err(e) = blockchain.add_to_mempool(tx.clone()) {
                     warn!("transaction rejected: {e}, closing connection");
-                    return;
+                    continue;
                 }
                 info!("added transaction to mempool");
-                broadcast_to_nodes(&ctx, || Message::NewTransaction(tx.clone())).await;
+                let gossip = Envelope::new(
+                    ctx.network.self_id.clone(),
+                    DEFAULT_TTL,
+                    Message::NewTransaction(tx.clone()),
+                );
+                broadcast_except(&ctx, Some(&from_peer), gossip).await;
                 info!("transaction sent to all nodes");
             }
-            FetchTemplate(pubkey) => {
+            Message::FetchTemplate(pubkey) => {
                 let blockchain = ctx.blockchain.read().await;
-                
+
                 // Build transactions list: coinbase first, then mempool transactions
                 let mut transactions: Vec<Transaction> = blockchain
                     .mempool()
@@ -160,7 +225,7 @@ pub async fn handle_connection(ctx: NodeContext, mut socket: TcpStream) {
                 let coinbase = Transaction {
                     inputs: vec![],
                     outputs: vec![TransactionOutput {
-                        pubkey,
+                        pubkey: pubkey.clone(),
                         value: 0,
                         unique_id: Uuid::new_v4(),
                     }],
@@ -185,7 +250,7 @@ pub async fn handle_connection(ctx: NodeContext, mut socket: TcpStream) {
                     Ok(fees) => fees,
                     Err(e) => {
                         error!("error calculating miner fees: {e}, closing connection");
-                        return;
+                        continue;
                     }
                 };
 
@@ -195,9 +260,28 @@ pub async fn handle_connection(ctx: NodeContext, mut socket: TcpStream) {
                 // Calculate merkle root once after coinbase value is finalized
                 block.header.merkle_root = MerkleRoot::calculate(&block.transactions);
 
-                let message = Template(block);
-                message.send_async(&mut socket).await.unwrap();
+                let reply = Envelope::new(
+                    ctx.network.self_id.clone(),
+                    DEFAULT_TTL,
+                    Message::Template(block),
+                );
+                ctx.network.send_to(&from_peer, reply).await;
             }
         }
+
+        if should_gossip && env.ttl > 0 {
+            env.ttl -= 1;
+            broadcast_except(&ctx, Some(&from_peer), env).await;
+        }
+    }
+}
+
+async fn broadcast_except(ctx: &NodeContext, except: Option<&PeerId>, env: Envelope) {
+    for item in ctx.network.peers.iter() {
+        let peer_id = item.key();
+        if except.is_some_and(|e| e == peer_id) {
+            continue;
+        }
+        let _ = item.value().outbound.try_send(env.clone());
     }
 }
