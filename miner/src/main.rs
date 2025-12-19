@@ -34,7 +34,6 @@ struct Miner {
     mined_block_receiver: flume::Receiver<Block>,
 }
 // TODO multithreaded mining
-// TODO submit block to multiple nodes
 impl Miner {
     async fn new(address: String, public_key: PublicKey) -> Result<Self> {
         let stream = TcpStream::connect(&address).await?;
