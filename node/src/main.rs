@@ -7,6 +7,7 @@ use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 mod context;
 mod database;
 mod handler;
+mod network;
 mod util;
 
 fn init_tracing() -> Result<()> {
@@ -69,9 +70,21 @@ async fn main() -> Result<()> {
     // and a task to periodically save the blockchain
     tokio::spawn(util::save(ctx_save));
 
+    // Spawn dispatcher once
+    let dispatcher_ctx = ctx.clone();
+    tokio::spawn(async move {
+        if let Err(err) = handler::dispatcher_loop(dispatcher_ctx).await {
+            tracing::error!("dispatcher exited: {err}");
+        }
+    });
+
     loop {
-        let (socket, _) = listener.accept().await?;
-        let ctx_handle = ctx.clone();
-        tokio::spawn(handler::handle_connection(ctx_handle, socket));
+        let (socket, peer_addr) = listener.accept().await?;
+        let ctx_accept = ctx.clone();
+        tokio::spawn(async move {
+            if let Err(err) = handler::accept_peer(ctx_accept, socket, peer_addr).await {
+                tracing::warn!("failed to accept peer: {err}");
+            }
+        });
     }
 }

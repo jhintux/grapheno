@@ -1,6 +1,6 @@
 use anyhow::{Result, anyhow};
 use btclib::crypto::PublicKey;
-use btclib::network::Message;
+use btclib::network::{Envelope, Message};
 use btclib::types::Block;
 use btclib::util::Saveable;
 use clap::Parser;
@@ -12,6 +12,9 @@ use std::thread;
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio::time::{Duration, interval};
+use uuid::Uuid;
+
+const DEFAULT_TTL: u8 = 8;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -22,6 +25,7 @@ struct Cli {
     public_key_file: String,
 }
 struct Miner {
+    node_id: String,
     public_key: PublicKey,
     stream: Mutex<TcpStream>,
     current_template: Arc<std::sync::Mutex<Option<Block>>>,
@@ -30,12 +34,12 @@ struct Miner {
     mined_block_receiver: flume::Receiver<Block>,
 }
 // TODO multithreaded mining
-// TODO submit block to multiple nodes
 impl Miner {
     async fn new(address: String, public_key: PublicKey) -> Result<Self> {
         let stream = TcpStream::connect(&address).await?;
         let (mined_block_sender, mined_block_receiver) = flume::unbounded();
         Ok(Self {
+            node_id: Uuid::new_v4().to_string(),
             public_key,
             stream: Mutex::new(stream),
             current_template: Arc::new(std::sync::Mutex::new(None)),
@@ -95,13 +99,8 @@ impl Miner {
     async fn fetch_template(&self) -> Result<()> {
         println!("Fetching new template");
         let message = Message::FetchTemplate(self.public_key.clone());
-        let mut stream_lock = self.stream.lock().await;
-        message.send_async(&mut *stream_lock).await?;
-        drop(stream_lock);
-        let mut stream_lock = self.stream.lock().await;
-        match Message::receive_async(&mut *stream_lock).await? {
+        match self.send_and_receive(message).await? {
             Message::Template(template) => {
-                drop(stream_lock);
                 println!(
                     "Received new template with target: {}",
                     template.header.target
@@ -119,13 +118,8 @@ impl Miner {
     async fn validate_template(&self) -> Result<()> {
         if let Some(template) = self.current_template.lock().unwrap().clone() {
             let message = Message::ValidateTemplate(template);
-            let mut stream_lock = self.stream.lock().await;
-            message.send_async(&mut *stream_lock).await?;
-            drop(stream_lock);
-            let mut stream_lock = self.stream.lock().await;
-            match Message::receive_async(&mut *stream_lock).await? {
+            match self.send_and_receive(message).await? {
                 Message::TemplateValidity(valid) => {
-                    drop(stream_lock);
                     if !valid {
                         println!("Current template is no longer valid");
                         self.mining.store(false, Ordering::Relaxed);
@@ -146,10 +140,24 @@ impl Miner {
     async fn submit_block(&self, block: Block) -> Result<()> {
         println!("Submitting mined block");
         let message = Message::SubmitTemplate(block);
-        let mut stream_lock = self.stream.lock().await;
-        message.send_async(&mut *stream_lock).await?;
+        self.send_only(message).await?;
         self.mining.store(false, Ordering::Relaxed);
         Ok(())
+    }
+
+    async fn send_only(&self, msg: Message) -> Result<()> {
+        let env = Envelope::new(self.node_id.clone(), DEFAULT_TTL, msg);
+        let mut stream = self.stream.lock().await;
+        env.send_async(&mut *stream).await?;
+        Ok(())
+    }
+
+    async fn send_and_receive(&self, msg: Message) -> Result<Message> {
+        let env = Envelope::new(self.node_id.clone(), DEFAULT_TTL, msg);
+        let mut stream = self.stream.lock().await;
+        env.send_async(&mut *stream).await?;
+        let reply = Envelope::receive_async(&mut *stream).await?;
+        Ok(reply.msg)
     }
 }
 

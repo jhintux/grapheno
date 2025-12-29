@@ -17,6 +17,7 @@ toml = "0.8.14"
 tracing = "0.1.40"
 tracing-appender = "0.2.3"
 uuid = { version = "1.9.1", features = ["v4", "serde"] }
+bigdecimal = "0.4.9"
 
 # ours
 btclib = { version = "0.1.0", path = "../lib" }

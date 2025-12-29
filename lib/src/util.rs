@@ -11,6 +11,9 @@ pub struct MerkleRoot(Hash);
 impl MerkleRoot {
     // calculate the merkle root of a block's transactions
     pub fn calculate(transactions: &[Transaction]) -> MerkleRoot {
+        if transactions.is_empty() {
+            return MerkleRoot(Hash::zero());
+        }
         let mut layer: Vec<Hash> = vec![];
         for transaction in transactions {
             layer.push(Hash::hash(transaction));
