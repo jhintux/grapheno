@@ -1,15 +1,12 @@
-my_keys = [
-    { public = "alice.pub.pem", private = "alice.priv.cbor" }
-]
 default_node = "127.0.0.1:9000"
 
-[[contacts]]
-name = "Alice"
-key = "alice.pub.pem"
+[[my_keys]]
+public = "keys/alice.pub.pem"
+private = "keys/alice.priv.cbor"
 
 [[contacts]]
 name = "Bob"
-key = "bob.pub.pem"
+address = "18VvDB8FnwU4symRpFSjbFoDJFyzQyHWVV"
 
 [fee_config]
 fee_type = "Percent"

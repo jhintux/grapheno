@@ -8,10 +8,11 @@ use crate::{
 };
 use bigdecimal::BigDecimal;
 use chrono::{DateTime, Utc};
+use hex;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write, Result as IoResult, Error as IoError, ErrorKind as IoErrorKind};
-use tracing::{instrument, warn, error};
+use tracing::{instrument, warn, error, info};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Blockchain {
@@ -112,8 +113,9 @@ impl Blockchain {
                 }
 
                 for output in &transaction.outputs {
+                    let output_hash = output.hash();
                     self.utxos
-                        .insert(transaction.hash(), (false, output.clone()));
+                        .insert(output_hash, (false, output.clone()));
                 }
             }
         }
@@ -166,16 +168,104 @@ impl Blockchain {
 
     #[instrument(skip(self, transaction))]
     pub fn add_to_mempool(&mut self, transaction: Transaction) -> Result<()> {
+        info!("Validating transaction: {}", transaction.hash());
+        info!("Transaction has {} inputs, {} outputs", transaction.inputs.len(), transaction.outputs.len());
+        
+        // Log all UTXOs in the blockchain
+        info!("Blockchain UTXO set contains {} UTXOs", self.utxos.len());
+        let mut utxo_hashes: Vec<_> = self.utxos.keys().collect();
+        // Sort by hash string representation for consistent ordering
+        utxo_hashes.sort_by_key(|h| format!("{}", h));
+        info!("Available UTXO hashes in blockchain (first 10):");
+        for (idx, hash) in utxo_hashes.iter().take(10).enumerate() {
+            if let Some((marked, output)) = self.utxos.get(hash) {
+                info!("  {}: hash={}, value={}, marked={}, address={}", 
+                    idx, hash, output.value, marked, output.address);
+            }
+        }
+        
         let mut known_inputs = HashSet::new();
 
-        for input in &transaction.inputs {
+        for (idx, input) in transaction.inputs.iter().enumerate() {
+            info!("=== VALIDATING INPUT {} ===", idx);
+            info!("Input prev_tx_hash: {}", input.prev_transaction_output_hash);
+            info!("Input public key address: {}", input.public_key.to_address());
+            info!("Input hash bytes (hex): {}", hex::encode(input.prev_transaction_output_hash.as_bytes()));
+            
             if !self.utxos.contains_key(&input.prev_transaction_output_hash) {
+                error!("Transaction input {} references non-existent UTXO: {}", idx, input.prev_transaction_output_hash);
+                error!("  Input hash bytes (hex): {}", hex::encode(input.prev_transaction_output_hash.as_bytes()));
+                warn!("  Searching for similar UTXOs...");
+                
+                // Try to find UTXOs with the same address
+                let input_address = input.public_key.to_address();
+                let matching_utxos: Vec<_> = self.utxos.iter()
+                    .filter(|(_, (_, output))| output.address == input_address)
+                    .collect();
+                
+                if !matching_utxos.is_empty() {
+                    warn!("  Found {} UTXOs with matching address {}:", matching_utxos.len(), input_address);
+                    for (hash, (marked, output)) in matching_utxos.iter().take(10) {
+                        warn!("    hash={}, value={}, marked={}, address={}, unique_id={}", 
+                            hash, output.value, marked, output.address, output.unique_id);
+                        warn!("      hash bytes (hex): {}", hex::encode(hash.as_bytes()));
+                        
+                        // Check if this UTXO's hash matches what we're looking for
+                        let utxo_hash = output.hash();
+                        if utxo_hash == input.prev_transaction_output_hash {
+                            error!("  *** FOUND MATCHING UTXO BY HASH CALCULATION! ***");
+                            error!("  But it's not in the UTXO map with that hash!");
+                            error!("  UTXO hash: {}, Input hash: {}", utxo_hash, input.prev_transaction_output_hash);
+                        }
+                    }
+                } else {
+                    warn!("  No UTXOs found with address {}", input_address);
+                }
+                
+                // Check if any UTXO has a similar hash (first few bytes)
+                let input_hash_str = format!("{}", input.prev_transaction_output_hash);
+                let input_prefix = &input_hash_str[..16.min(input_hash_str.len())];
+                warn!("  Looking for UTXOs with hash starting with {}...", input_prefix);
+                let similar_utxos: Vec<_> = self.utxos.keys()
+                    .filter(|hash| format!("{}", hash).starts_with(input_prefix))
+                    .take(10)
+                    .collect();
+                if !similar_utxos.is_empty() {
+                    warn!("  Found {} similar hashes:", similar_utxos.len());
+                    for hash in similar_utxos {
+                        warn!("    {}", hash);
+                        warn!("      hash bytes (hex): {}", hex::encode(hash.as_bytes()));
+                    }
+                }
+                
+                // List all UTXO hashes for debugging
+                warn!("  All UTXO hashes in blockchain:");
+                let mut all_hashes: Vec<_> = self.utxos.keys().collect();
+                all_hashes.sort_by_key(|h| format!("{}", h));
+                for (i, hash) in all_hashes.iter().take(20).enumerate() {
+                    warn!("    {}: {}", i, hash);
+                }
+                
                 return Err(BtcError::InvalidTransaction);
             }
             if known_inputs.contains(&input.prev_transaction_output_hash) {
+                warn!("Transaction has duplicate input: {}", input.prev_transaction_output_hash);
                 return Err(BtcError::InvalidTransaction);
             }
             known_inputs.insert(input.prev_transaction_output_hash);
+            
+            // Log the UTXO we found
+            if let Some((marked, output)) = self.utxos.get(&input.prev_transaction_output_hash) {
+                info!("  Input {} UTXO found: value={}, marked={}, address={}, unique_id={}", 
+                    idx, output.value, marked, output.address, output.unique_id);
+                
+                // Verify the address matches
+                let input_address = input.public_key.to_address();
+                if input_address != output.address {
+                    warn!("  Address mismatch! Input address: {}, UTXO address: {}", 
+                        input_address, output.address);
+                }
+            }
         }
 
         // Calculate the fee of the new transaction
@@ -193,7 +283,10 @@ impl Blockchain {
         let new_outputs_value: u64 = transaction.outputs.iter().map(|output| output.value).sum();
         let new_transaction_fee = new_inputs_value
             .checked_sub(new_outputs_value)
-            .ok_or(BtcError::InvalidTransaction)?;
+            .ok_or_else(|| {
+                warn!("Transaction outputs exceed inputs: inputs={}, outputs={}", new_inputs_value, new_outputs_value);
+                BtcError::InvalidTransaction
+            })?;
 
         for input in &transaction.inputs {
             if let Some((true, _)) = self.utxos.get(&input.prev_transaction_output_hash) {
@@ -233,6 +326,7 @@ impl Blockchain {
 
                     // If the new transaction fee is less than the referencing transaction fee, the new transaction is rejected
                     if new_transaction_fee <= referencing_fee {
+                        warn!("Transaction fee too low: new_fee={}, existing_fee={}", new_transaction_fee, referencing_fee);
                         return Err(BtcError::InvalidTransaction);
                     }
 
@@ -257,10 +351,11 @@ impl Blockchain {
             }
         }
 
-        // all inputs must be lower than all outputs
+        // all inputs must be greater than or equal to all outputs
         let all_inputs = new_inputs_value;
         let all_outputs = new_outputs_value;
         if all_inputs < all_outputs {
+            warn!("Transaction inputs less than outputs: inputs={}, outputs={}", all_inputs, all_outputs);
             return Err(BtcError::InvalidTransaction);
         }
 

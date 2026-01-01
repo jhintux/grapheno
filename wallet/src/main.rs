@@ -51,14 +51,23 @@ async fn main() -> Result<()> {
     let mut core = Core::load(cli.config.clone()).await?;
     if let Some(node) = cli.node {
         info!("Overriding default node with: {}", node);
-        core.config.default_node = node;
+        let mut config = core.config.write().unwrap();
+        config.default_node = node;
     }
 
     let (tx_sender, tx_receiver) = kanal::bounded(10);
-    core.tx_sender = tx_sender;
+    core.tx_sender = tx_sender.clone();
 
     let core = Arc::new(core);
     info!("Starting background tasks");
+    
+    // Fetch UTXOs immediately on startup
+    info!("Fetching initial UTXOs...");
+    if let Err(e) = core.fetch_utxos().await {
+        warn!("Failed to fetch initial UTXOs: {}", e);
+    } else {
+        info!("Initial UTXOs fetched successfully");
+    }
 
     let balance_content = TextContent::new(big_mode_btc(&core));
     tokio::select! {

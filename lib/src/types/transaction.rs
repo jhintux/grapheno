@@ -37,6 +37,7 @@ impl Saveable for Transaction {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct TransactionInput {
     pub prev_transaction_output_hash: Hash,
+    pub public_key: PublicKey,
     pub signature: Signature,
 }
 
@@ -44,7 +45,7 @@ pub struct TransactionInput {
 pub struct TransactionOutput {
     pub value: u64,
     pub unique_id: Uuid,
-    pub pubkey: PublicKey,
+    pub address: String,
 }
 
 impl TransactionOutput {

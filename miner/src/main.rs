@@ -98,7 +98,7 @@ impl Miner {
 
     async fn fetch_template(&self) -> Result<()> {
         println!("Fetching new template");
-        let message = Message::FetchTemplate(self.public_key.clone());
+        let message = Message::FetchTemplate(self.public_key.to_address());
         match self.send_and_receive(message).await? {
             Message::Template(template) => {
                 println!(

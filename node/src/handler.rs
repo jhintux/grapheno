@@ -225,7 +225,7 @@ pub async fn dispatcher_loop(ctx: NodeContext) -> Result<()> {
                 let coinbase = Transaction {
                     inputs: vec![],
                     outputs: vec![TransactionOutput {
-                        pubkey: pubkey.clone(),
+                        address: *pubkey,
                         value: 0,
                         unique_id: Uuid::new_v4(),
                     }],
