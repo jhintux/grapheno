@@ -61,13 +61,16 @@ async fn main() -> Result<()> {
     let core = Arc::new(core);
     info!("Starting background tasks");
     
-    // Fetch UTXOs immediately on startup
-    info!("Fetching initial UTXOs...");
-    if let Err(e) = core.fetch_utxos().await {
-        warn!("Failed to fetch initial UTXOs: {}", e);
-    } else {
-        info!("Initial UTXOs fetched successfully");
-    }
+    // Fetch UTXOs in background (non-blocking) so UI can start immediately
+    let core_fetch = core.clone();
+    tokio::spawn(async move {
+        info!("Fetching initial UTXOs...");
+        if let Err(e) = core_fetch.fetch_utxos().await {
+            warn!("Failed to fetch initial UTXOs: {}", e);
+        } else {
+            info!("Initial UTXOs fetched successfully");
+        }
+    });
 
     let balance_content = TextContent::new(big_mode_btc(&core));
     tokio::select! {

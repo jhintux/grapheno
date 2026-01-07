@@ -1,5 +1,5 @@
 use crate::database::BlockchainDB;
-use crate::network::NetworkHub;
+use crate::network_legacy::NetworkHub;
 use crate::util::populate_connections;
 use anyhow::Result;
 use btclib::types::Blockchain;

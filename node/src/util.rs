@@ -9,26 +9,19 @@ use tracing::{debug, error, info, warn};
 
 use crate::context::NodeContext;
 use crate::database::BlockchainDB;
-use crate::handler;
 
-pub async fn populate_connections(ctx: NodeContext, nodes: &[String]) -> Result<()> {
+pub async fn populate_connections(_ctx: NodeContext, nodes: &[String]) -> Result<()> {
     debug!("trying to connect to other nodes...");
     for node in nodes {
         debug!("connecting to {}", node);
         match TcpStream::connect(&node).await {
-            Ok(stream) => {
+            Ok(_stream) => {
                 info!("connected to {}", node);
-                let peer_addr = match stream.peer_addr() {
-                    Ok(addr) => addr,
-                    Err(err) => {
-                        warn!("missing peer addr for {}: {err}", node);
-                        continue;
-                    }
-                };
-                let ctx_clone = ctx.clone();
-                tokio::spawn(async move {
-                    let _ = handler::accept_peer(ctx_clone, stream, peer_addr).await;
-                });
+                // Note: populate_connections is called during initialization before PeerManager exists
+                // In the new architecture, connections are handled by PeerManager in main.rs
+                // This function is kept for API compatibility but connections should be initiated
+                // through the PeerManager after it's created
+                warn!("populate_connections: connections should be initiated through PeerManager in new architecture, skipping {}", node);
             }
             Err(err) => warn!("failed to connect to {}: {}", node, err),
         }

@@ -12,10 +12,9 @@ use std::sync::{Arc, RwLock};
 use tokio::net::TcpStream;
 use tokio::sync::{Mutex, oneshot};
 use tokio::io::AsyncReadExt;
+use tokio::time::{timeout, Duration};
 use tracing::*;
 use uuid::Uuid;
-
-const DEFAULT_TTL: u8 = 8;
 
 /// Represent a key pair with paths to public and private keys
 #[derive(Serialize, Deserialize, Clone)]
@@ -161,16 +160,66 @@ impl Core {
             let address = key.public.to_address();
             info!("Fetching UTXOs for address: {}", address);
             let message = Message::FetchUTXOs(address.clone());
-            let envelope = Envelope::new(self.wallet_id.clone(), DEFAULT_TTL, message);
+            // TTL is no longer used in the new architecture (inventory-driven protocol)
+            let envelope = Envelope::new(self.wallet_id.clone(), 0, message);
+            
+            // Hold the stream lock for the entire send/receive operation
+            let mut stream = self.stream.lock().await;
             envelope
-                .send_async(&mut *self.stream.lock().await)
+                .send_async(&mut *stream)
                 .await
                 .context("Failed to send FetchUTXOs message")?;
 
-            let response_envelope = Envelope::receive_async(&mut *self.stream.lock().await)
-                .await
-                .context("Failed to receive UTXOs response")?;
+            // Keep reading until we get a response to our request
+            // The node may send other messages (like Inv announcements) that we need to skip
+            // Add timeout to prevent infinite hanging (10 seconds total)
+            const TOTAL_TIMEOUT: Duration = Duration::from_secs(10);
+            const PER_MESSAGE_TIMEOUT: Duration = Duration::from_secs(2);
+            let start_time = std::time::Instant::now();
+            
+            let response_envelope = loop {
+                // Check if we've exceeded total timeout
+                if start_time.elapsed() > TOTAL_TIMEOUT {
+                    return Err(anyhow!("Timeout waiting for UTXOs response from node (waited {}s)", TOTAL_TIMEOUT.as_secs()));
+                }
+                
+                let envelope = match timeout(PER_MESSAGE_TIMEOUT, Envelope::receive_async(&mut *stream)).await {
+                    Ok(Ok(env)) => env,
+                    Ok(Err(e)) => return Err(anyhow!("Failed to receive UTXOs response: {}", e)),
+                    Err(_) => {
+                        // Per-message timeout - continue trying if we haven't exceeded total timeout
+                        debug!("Timeout waiting for message, continuing...");
+                        continue;
+                    }
+                };
+                
+                // Filter out messages we don't care about
+                match &envelope.msg {
+                    // These are inventory-driven protocol messages we can ignore
+                    Message::Inv(_) | Message::GetData(_) | Message::Block(_) | Message::Tx(_) => {
+                        // Skip inventory messages - they're not responses to our requests
+                        debug!("Skipping inventory message: {:?}", envelope.msg);
+                        continue;
+                    }
+                    // Legacy broadcast messages we can ignore
+                    Message::NewBlock(_) | Message::NewTransaction(_) => {
+                        // Skip these too - they're broadcasts
+                        debug!("Skipping broadcast message: {:?}", envelope.msg);
+                        continue;
+                    }
+                    // This is the response we're waiting for
+                    Message::UTXOs(_) => {
+                        break envelope;
+                    }
+                    // Everything else might be a response, but we'll handle it
+                    _ => {
+                        warn!("Received unexpected message type while waiting for UTXOs: {:?}", envelope.msg);
+                        break envelope;
+                    }
+                }
+            };
 
+            // Process the UTXOs response
             if let Message::UTXOs(utxos) = response_envelope.msg {
                 info!("Received {} UTXOs for address {}", utxos.len(), address);
                 let mut received_hashes = Vec::new();
@@ -219,7 +268,8 @@ impl Core {
                     }
                 }
             } else {
-                return Err(anyhow!("Unexpected response from node"));
+                error!("Received unexpected message type while waiting for UTXOs response. Expected UTXOs, got: {:?}", response_envelope.msg);
+                return Err(anyhow!("Unexpected response from node: {:?}", response_envelope.msg));
             }
         }
         info!("UTXO fetch completed");
@@ -242,7 +292,8 @@ impl Core {
         }
         
         let message = Message::SubmitTransaction(transaction.clone());
-        let envelope = Envelope::new(self.wallet_id.clone(), DEFAULT_TTL, message);
+        // TTL is no longer used in the new architecture (inventory-driven protocol)
+        let envelope = Envelope::new(self.wallet_id.clone(), 0, message);
         let mut stream = self.stream.lock().await;
         
         // Send the transaction

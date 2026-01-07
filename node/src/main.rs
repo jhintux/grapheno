@@ -8,6 +8,7 @@ mod context;
 mod database;
 mod handler;
 mod network;
+mod network_legacy;
 mod util;
 
 fn init_tracing() -> Result<()> {
@@ -70,19 +71,28 @@ async fn main() -> Result<()> {
     // and a task to periodically save the blockchain
     tokio::spawn(util::save(ctx_save));
 
-    // Spawn dispatcher once
-    let dispatcher_ctx = ctx.clone();
+    // Create PeerManager (Bitcoin-style architecture)
+    use crate::network::peer_manager::PeerManager;
+    const EVENT_BUFFER: usize = 256;
+    let (peer_manager, event_rx) = PeerManager::new(ctx.clone(), EVENT_BUFFER);
+    
+    // Spawn PeerManager event loop (replaces dispatcher_loop)
+    let peer_manager_clone = peer_manager.clone();
     tokio::spawn(async move {
-        if let Err(err) = handler::dispatcher_loop(dispatcher_ctx).await {
-            tracing::error!("dispatcher exited: {err}");
+        if let Err(err) = PeerManager::run(event_rx, peer_manager_clone).await {
+            tracing::error!("PeerManager exited: {err}");
         }
     });
 
+    // Get event sender for forwarding events from PeerConnections
+    let event_tx = peer_manager.event_sender();
+
     loop {
         let (socket, peer_addr) = listener.accept().await?;
-        let ctx_accept = ctx.clone();
+        let peer_manager_accept = peer_manager.clone();
+        let event_tx_accept = event_tx.clone();
         tokio::spawn(async move {
-            if let Err(err) = handler::accept_peer(ctx_accept, socket, peer_addr).await {
+            if let Err(err) = handler::accept_peer(peer_manager_accept, event_tx_accept, socket, peer_addr).await {
                 tracing::warn!("failed to accept peer: {err}");
             }
         });

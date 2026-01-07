@@ -7,6 +7,38 @@ use uuid::Uuid;
 /// Unique identifier for a node in the network.
 pub type NodeId = String;
 
+/// Inventory item type (Bitcoin-style inventory system)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
+pub enum InvType {
+    /// Block inventory
+    Block = 2,
+    /// Transaction inventory
+    Tx = 1,
+}
+
+/// Inventory item (hash + type)
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize, Serialize)]
+pub struct InvItem {
+    pub inv_type: InvType,
+    pub hash: crate::sha256::Hash,
+}
+
+impl InvItem {
+    pub fn block(hash: crate::sha256::Hash) -> Self {
+        Self {
+            inv_type: InvType::Block,
+            hash,
+        }
+    }
+
+    pub fn tx(hash: crate::sha256::Hash) -> Self {
+        Self {
+            inv_type: InvType::Tx,
+            hash,
+        }
+    }
+}
+
 // TODO implement gRPC for the network
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub enum Message {
@@ -51,6 +83,14 @@ pub enum Message {
     AllBlocks(Vec<Block>),
     /// Broadcast a new block to other nodes
     NewBlock(Block),
+    /// Inventory announcement (Bitcoin-style: announce hash before sending data)
+    Inv(Vec<InvItem>),
+    /// Request data for inventory items
+    GetData(Vec<InvItem>),
+    /// Response containing a block (sent after GetData)
+    Block(Block),
+    /// Response containing a transaction (sent after GetData)
+    Tx(Transaction),
 }
 
 /// Envelope carries a message with routing metadata for loop prevention.

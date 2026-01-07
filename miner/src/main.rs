@@ -14,8 +14,6 @@ use tokio::sync::Mutex;
 use tokio::time::{Duration, interval};
 use uuid::Uuid;
 
-const DEFAULT_TTL: u8 = 8;
-
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
 struct Cli {
@@ -146,18 +144,47 @@ impl Miner {
     }
 
     async fn send_only(&self, msg: Message) -> Result<()> {
-        let env = Envelope::new(self.node_id.clone(), DEFAULT_TTL, msg);
+        // TTL is no longer used in the new architecture (inventory-driven protocol)
+        let env = Envelope::new(self.node_id.clone(), 0, msg);
         let mut stream = self.stream.lock().await;
         env.send_async(&mut *stream).await?;
         Ok(())
     }
 
     async fn send_and_receive(&self, msg: Message) -> Result<Message> {
-        let env = Envelope::new(self.node_id.clone(), DEFAULT_TTL, msg);
+        // TTL is no longer used in the new architecture (inventory-driven protocol)
+        let env = Envelope::new(self.node_id.clone(), 0, msg);
         let mut stream = self.stream.lock().await;
         env.send_async(&mut *stream).await?;
-        let reply = Envelope::receive_async(&mut *stream).await?;
-        Ok(reply.msg)
+        
+        // Keep reading until we get a response to our request
+        // The node may send other messages (like Inv announcements) that we need to skip
+        loop {
+            let reply = Envelope::receive_async(&mut *stream).await?;
+            
+            // Filter out messages we don't care about
+            match &reply.msg {
+                // These are inventory-driven protocol messages we can ignore
+                Message::Inv(_) | Message::GetData(_) | Message::Block(_) | Message::Tx(_) => {
+                    // Skip inventory messages - they're not responses to our requests
+                    continue;
+                }
+                // These are responses we're waiting for
+                Message::Template(_) | Message::TemplateValidity(_) | Message::NodeList(_) 
+                | Message::UTXOs(_) | Message::Difference(_) | Message::AllBlocks(_) => {
+                    return Ok(reply.msg);
+                }
+                // Legacy messages we might receive
+                Message::NewBlock(_) | Message::NewTransaction(_) => {
+                    // Skip these too - they're broadcasts
+                    continue;
+                }
+                // Everything else is a response
+                _ => {
+                    return Ok(reply.msg);
+                }
+            }
+        }
     }
 }
 
