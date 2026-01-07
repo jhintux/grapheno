@@ -136,7 +136,7 @@ pub async fn dispatcher_loop(ctx: NodeContext) -> Result<()> {
                 let utxos = blockchain
                     .utxos()
                     .iter()
-                    .filter(|(_, (_, txout))| txout.pubkey == *key)
+                    .filter(|(_, (_, txout))| txout.address == key.clone())
                     .map(|(_, (marked, txout))| (txout.clone(), *marked))
                     .collect::<Vec<_>>();
                 let reply = Envelope::new(
@@ -225,7 +225,7 @@ pub async fn dispatcher_loop(ctx: NodeContext) -> Result<()> {
                 let coinbase = Transaction {
                     inputs: vec![],
                     outputs: vec![TransactionOutput {
-                        address: *pubkey,
+                        address: pubkey.clone(),
                         value: 0,
                         unique_id: Uuid::new_v4(),
                     }],
